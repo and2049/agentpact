@@ -40,7 +40,7 @@ export type JobStatus = "OPEN" | "AWARDED" | "CLOSED"
 export type QuoteStatus = "pending" | "open" | "awarded" | "lost"
 export type Role = "buyer" | "seller" | "verifier" | "platform"
 
-export interface User { id: string; provider: "paypal" | "dev"; name: string; email: string; operator?: boolean }
+export interface User { id: string; provider: "paypal" | "dev"; provider_user_id?: string; name: string; email: string; operator?: boolean }
 export interface Config { clientId: string; env: string; devLogin: boolean; keyCustody: boolean; templates: Array<{ id: string; name: string; rubric: { minWords: number; maxWords: number; criteria?: string[] } }> }
 
 export type Facts = Record<string, string | number>

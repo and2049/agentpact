@@ -54,6 +54,13 @@ export function OpsPage() {
   const [actionError, setActionError] = React.useState<unknown>(null)
   const [steps, setSteps] = React.useState<Step[]>([])
   const running = steps.some((s) => s.state === "running")
+  // Leaving the page cancels a running script: no award or navigation from an abandoned handler.
+  const alive = React.useRef(true)
+  React.useEffect(() => {
+    alive.current = true
+    return () => { alive.current = false }
+  }, [])
+  const seededSeller = me?.provider === "dev" && me.provider_user_id === "seller"
 
   if (!me || !operator) {
     return (
@@ -82,6 +89,7 @@ export function OpsPage() {
 
   /** The YouTube walkthrough: post → quotes → award, then hand over to the pact page for the PayPal approval. */
   const runScript = async () => {
+    if (seededSeller) return
     setActionError(null)
     setSteps([
       { label: "Post the demo job as this account", state: "running" },
@@ -95,24 +103,35 @@ export function OpsPage() {
       setStep(1, { state: "running" })
       let quotes = job.quotes ?? []
       const deadline = Date.now() + 120_000
-      while (Date.now() < deadline) {
+      let quoting = true
+      while (Date.now() < deadline && alive.current) {
         await sleep(3000)
         const j = await api<JobDetail>(`/api/jobs/${job.id}`)
         quotes = (j.quotes ?? []).filter((q) => q.status === "open")
+        quoting = Boolean(j.quoting)
         setStep(1, { detail: `${quotes.length} quote${quotes.length === 1 ? "" : "s"} so far` })
-        if (!j.quoting && quotes.length) break
-        if (quotes.length >= 3) break
+        if (!quoting || quotes.length >= 3) break
       }
-      if (!quotes.length) throw new Error("No quotes arrived within two minutes.")
+      if (!alive.current) return
+      if (!quotes.length) throw new Error(quoting ? "No quotes arrived within two minutes." : `No eligible agent quoted. Open job: /jobs/${job.id}`)
       setStep(1, { state: "done", detail: `${quotes.length} quotes` })
       setStep(2, { state: "running" })
       const best = [...quotes].sort((a, b) => a.unit_price_cents - b.unit_price_cents || a.eta_minutes - b.eta_minutes)[0]!
-      const r = await api<{ pactId: string }>(`/api/jobs/${job.id}/award`, { method: "POST", body: { quoteId: best.id } })
+      let pactId: string
+      try {
+        pactId = (await api<{ pactId: string }>(`/api/jobs/${job.id}/award`, { method: "POST", body: { quoteId: best.id } })).pactId
+      } catch (e) {
+        // The award may be committed while order creation is unknown or failed: the pact page has the retry.
+        if (e instanceof ApiError && typeof e.body.pactId === "string") pactId = e.body.pactId
+        else throw e
+      }
+      if (!alive.current) return
       setStep(2, { state: "done", detail: `${best.agent?.name ?? "agent"} at ${cents(best.unit_price_cents)}/item` })
       setStep(3, { state: "running", detail: "Opening the pact page…" })
       await sleep(800)
-      navigate(`/pacts/${r.pactId}`)
+      if (alive.current) navigate(`/pacts/${pactId}`)
     } catch (e) {
+      if (!alive.current) return
       setSteps((s) => s.map((st) => (st.state === "running" ? { ...st, state: "failed", detail: errorText(e) } : st)))
       setActionError(e)
     }
@@ -137,11 +156,14 @@ export function OpsPage() {
       <Notice error={error ?? actionError} />
       <div className="grid gap-6 lg:grid-cols-2">
         <Section title="Scripted demo" description="Posts a real job from this account, waits for the three personas to quote, awards the cheapest, then opens the pact for you to approve in PayPal. Everything after the approval runs on its own.">
-          <div>
-            <Button onClick={runScript} disabled={running}>
-              {running && <Spinner data-icon="inline-start" />}
-              Run the scripted demo
-            </Button>
+          <div className="flex flex-col gap-2">
+            <div>
+              <Button onClick={runScript} disabled={running || seededSeller}>
+                {running && <Spinner data-icon="inline-start" />}
+                Run the scripted demo
+              </Button>
+            </div>
+            {seededSeller && <p className="text-xs text-muted-foreground">The seeded seller owns all three personas and cannot buy from itself. Use the Demo Buyer account or a PayPal operator account.</p>}
           </div>
           {steps.length > 0 && (
             <ol className="flex flex-col gap-2 text-sm">

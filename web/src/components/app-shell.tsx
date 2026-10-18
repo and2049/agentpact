@@ -157,11 +157,13 @@ function DevLoginDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (
 
 /** Shown in place of a page that needs an account. */
 export function LoginPrompt({ what, hint }: { what: string; hint?: string }) {
+  const { config } = useSession()
   return (
     <div className="mx-auto flex w-full max-w-md flex-col gap-4 rounded-xl bg-card p-6 ring-1 ring-foreground/10">
       <div className="flex flex-col gap-1">
         <h2 className="font-heading text-lg font-medium">Log in to {what}</h2>
         <p className="text-sm text-muted-foreground">{hint ?? "Sign in with your PayPal account. It takes a few seconds and no password is shared with AgentPact."}</p>
+        {config.env !== "live" && <p className="text-xs text-muted-foreground">This deployment runs on PayPal's sandbox: log in with a PayPal sandbox account.</p>}
       </div>
       <div>
         <Button render={<a href="/auth/paypal/start" />} nativeButton={false}>

@@ -151,7 +151,7 @@ function AgentFormFields({ f, set, existing }: { f: AgentForm; set: (p: Partial<
               <Field>
                 <FieldLabel htmlFor="key">{existing?.has_key && !providerChanged ? "Replace API key (optional)" : "API key"}</FieldLabel>
                 <Input id="key" type="password" autoComplete="off" value={f.apiKey} onChange={(e) => set({ apiKey: e.target.value })} maxLength={400} minLength={16} placeholder="Stored encrypted; never shown again" required={!existing?.has_key || providerChanged} />
-                <FieldDescription>Sealed at rest, decrypted only when this agent runs, never written to logs.{providerChanged ? " Switching provider needs a key for the new provider." : ""}</FieldDescription>
+                <FieldDescription>Sealed at rest, decrypted only when this agent runs, never written to logs.{providerChanged ? " Switching provider needs a key for the new provider." : ""}{existing ? " Provider and key changes wait until pacts already awarded to this agent have delivered." : ""}</FieldDescription>
               </Field>
             </>
           )}
@@ -177,7 +177,7 @@ function AgentFormFields({ f, set, existing }: { f: AgentForm; set: (p: Partial<
                 </InputGroup>
               </Field>
             </div>
-            <FieldDescription>The agent quotes only jobs whose maximum price falls inside this band.</FieldDescription>
+            <FieldDescription>The agent quotes jobs whose budget meets the minimum, at a price inside this band and never above the buyer's maximum.</FieldDescription>
           </FieldSet>
           <Field>
             <FieldLabel htmlFor="maxItems">Max items per job</FieldLabel>
@@ -264,7 +264,7 @@ export function EditAgentPage() {
   }
   return (
     <form onSubmit={submit} className="mx-auto flex w-full max-w-2xl flex-col gap-6">
-      <PageHeader eyebrow="Agents" title={`Edit ${a.name}`} badge={<StatusBadge status={a.status} />} description="Changes apply to new quotes. Pacts already awarded keep the configuration frozen at award time." />
+      <PageHeader eyebrow="Agents" title={`Edit ${a.name}`} badge={<StatusBadge status={a.status} />} description="Changes apply to new quotes. Pacts already awarded keep the model frozen at award time, and the provider or key cannot change while any of them is still being produced." />
       <AgentFormFields f={f} set={(p) => setF((s) => (s ? { ...s, ...p } : s))} existing={a} />
       <Notice error={saveError} />
       <div className="flex justify-end gap-2">

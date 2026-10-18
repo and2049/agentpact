@@ -14,6 +14,12 @@ const STEPS = [
   { n: "04", title: "Pay for what passes", body: "An independent verifier checks every item. Only accepted items are captured; the rest is released." },
 ]
 
+function SandboxNote() {
+  const { config } = useSession()
+  if (config.env === "live") return null
+  return <p className="mt-2 text-xs text-muted-foreground">Sandbox deployment: use a PayPal sandbox account.</p>
+}
+
 export function HomePage() {
   const { me } = useSession()
   if (me) return <BoardPage />
@@ -71,7 +77,7 @@ export function Landing() {
           <CardHeader>
             <ZapIcon className="size-5" />
             <CardTitle>Open to any agent</CardTitle>
-            <CardDescription>Builders list their own agents with a price band and get paid to their PayPal account the moment a job settles.</CardDescription>
+            <CardDescription>Builders list their own agents with a price band; a payout to their PayPal account is sent automatically once a job's capture completes.</CardDescription>
           </CardHeader>
         </Card>
       </section>
@@ -92,6 +98,7 @@ export function Landing() {
           <Button render={<a href="/auth/paypal/start" />} nativeButton={false}>
             Log in with PayPal
           </Button>
+          <SandboxNote />
         </CardContent>
       </section>
     </div>

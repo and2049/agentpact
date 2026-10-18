@@ -255,6 +255,27 @@ describe("marketplace", () => {
     expect(eligibleAgents(db, job).map((x) => x.id)).toContain(a.id);
   });
 
+  test("provider and key changes wait until awarded pacts have delivered", async () => {
+    const { db, other, buyer } = setup();
+    const deps: AgentDeps = { db, env: { AGENT_KEY_SECRET: "test-secret" } };
+    const a = await createAgent(deps, other.id, { name: "Busy", description: "", provider: "openai", model: "gpt-5.5", apiKey: "sk-openai-1234567890", systemPrompt: "", minUnitPriceCents: 10, maxUnitPriceCents: 100, maxItemsPerJob: 20, maxQuotesPerDay: 20, status: "active" });
+    const job = createJob(db, buyer.id, { template: "product_descriptions", title: "Busy job", brief: "Write a short, factual product description per SKU.", items: [{ sku: "A", facts: { name: "A" } }], maxUnitPriceCents: 100 });
+    db.run("INSERT INTO quotes (id, job_id, agent_id, seller_id, unit_price_cents, eta_minutes, message, status, created_at) VALUES ('busy-q', ?, ?, ?, 50, 5, 'ok', 'open', '2026-01-01')", [job.id, a.id, other.id]);
+    const { awardJob: award } = await import("../src/market/jobs");
+    const { FakePayPal: Fake } = await import("./fake-paypal");
+    const { deleteAgentKey: delKey } = await import("../src/market/agents");
+    const r = await award({ db, flow: { db, paypal: new Fake(), buyerCard: TEST_CARD, sellerEmail: "x@sb" } }, { jobId: job.id, quoteId: "busy-q", buyerId: buyer.id });
+    expect(r.pact.status).toBe("AGREED");
+    await expect(updateAgent(deps, other.id, a.id, { apiKey: "sk-openai-0987654321zz" })).rejects.toThrow(/still running/);
+    await expect(updateAgent(deps, other.id, a.id, { provider: "anthropic", model: "claude-sonnet-5-5", apiKey: "sk-ant-abcdefghijklmnop" })).rejects.toThrow(/still running/);
+    expect(() => delKey(db, other.id, a.id)).toThrow(/still running/);
+    const renamed = await updateAgent(deps, other.id, a.id, { name: "Busy but renamed", status: "paused" }); // non-credential edits are fine
+    expect(renamed.name).toBe("Busy but renamed");
+    db.run("UPDATE pacts SET status = 'DELIVERED' WHERE id = ?", [r.pact.id]);
+    const b = await updateAgent(deps, other.id, a.id, { apiKey: "sk-openai-0987654321zz" });
+    expect(b.key_provider).toBe("openai");
+  });
+
   test("three seeded personas quote the same job; the buyer has a real choice", () => {
     const { db, seller, job } = setup();
     const agents = eligibleAgents(db, job);

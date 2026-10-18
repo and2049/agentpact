@@ -1,10 +1,10 @@
 import * as React from "react"
-import { Link, useNavigate } from "react-router-dom"
+import { Link, Navigate, useNavigate } from "react-router-dom"
 import { BriefcaseIcon, BotIcon } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { LoadingBlock, PageHeader, Section } from "@/components/primitives"
+import { LoadingBlock, Notice, PageHeader, Section } from "@/components/primitives"
 import { api, type Me } from "@/lib/api"
 import { useLoad, useSession } from "@/lib/session"
 
@@ -25,8 +25,8 @@ export function HowItWorksPage() {
         <ol className="flex list-decimal flex-col gap-2 pl-5 text-sm">
           <li>Log in with the PayPal account that should receive payouts.</li>
           <li>Register an agent: a name, a short pitch, a price band and optional style notes. Either run it on the platform's model or bring your own provider key, stored encrypted and never shown again.</li>
-          <li>Your agent quotes open jobs automatically within its band and limits. When a buyer awards it, the work runs on the configuration frozen at award time.</li>
-          <li>Accepted items are paid to your PayPal account as soon as the buyer's capture completes. Rejected items are not charged and not paid.</li>
+          <li>Your agent quotes open jobs whose budget meets its minimum, at a price inside its band. When a buyer awards it, the work runs on the configuration frozen at award time.</li>
+          <li>Once the buyer's capture completes, a payout for the accepted items is sent to your PayPal account automatically; it lands when PayPal confirms it. Rejected items are not charged and not paid.</li>
         </ol>
       </Section>
       <Section title="What the verifier checks">
@@ -51,9 +51,9 @@ export function SellPage() {
       <PageHeader eyebrow="For agent builders" title="Put your agent to work" description="List an agent once; it quotes matching jobs on its own and is paid to your PayPal account for every accepted item." />
       <div className="grid gap-4 md:grid-cols-3">
         {[
-          ["Set a price band", "Your agent quotes only jobs whose maximum price falls inside the band you choose, so you never work below your rate."],
+          ["Set a price band", "Your agent quotes jobs whose budget meets your minimum, at a price inside the band you choose, so you never work below your rate."],
           ["Choose the model", "Run on the platform's model with no setup, or bring an OpenAI, Anthropic or OpenCode key. Keys are sealed at rest and used only when your agent runs."],
-          ["Get paid on acceptance", "Accepted items are captured from the buyer and paid out to you automatically. No invoicing, no chasing."],
+          ["Get paid on acceptance", "Accepted items are captured from the buyer and a payout is sent to you automatically once the capture completes. No invoicing, no chasing."],
         ].map(([t, b]) => (
           <Card key={t}>
             <CardHeader>
@@ -81,14 +81,21 @@ export function SellPage() {
 export function WelcomePage() {
   const { me } = useSession()
   const navigate = useNavigate()
-  const { data } = useLoad(() => (me ? api<Me>("/api/me") : Promise.resolve(null)), [me?.id])
+  const { data, error, reload } = useLoad(() => (me ? api<Me>("/api/me") : Promise.resolve(null)), [me?.id])
   React.useEffect(() => {
     if (data && (data.jobs.length || data.agents.length || data.pacts.asBuyer.length || data.pacts.asSeller.length)) navigate("/account", { replace: true })
   }, [data, navigate])
-  if (!me) {
-    navigate("/", { replace: true })
-    return null
-  }
+  if (!me) return <Navigate to="/" replace />
+  if (error)
+    return (
+      <div className="mx-auto flex w-full max-w-md flex-col gap-3">
+        <Notice error={error} title="Could not load your account" />
+        <div className="flex gap-2">
+          <Button variant="outline" onClick={reload}>Try again</Button>
+          <Button variant="ghost" render={<Link to="/jobs" />} nativeButton={false}>Browse jobs</Button>
+        </div>
+      </div>
+    )
   if (!data) return <LoadingBlock />
   return (
     <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 py-6">
