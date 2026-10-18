@@ -83,7 +83,7 @@ export function settleReservation(db: Db, args: { mandateId: string; pactId: str
 }
 
 export function mandateForOwner(db: Db, ownerId: string): Mandate | null {
-  return db.query<Mandate, [string]>("SELECT * FROM mandates WHERE owner_id = ? ORDER BY created_at LIMIT 1").get(ownerId) ?? null;
+  return db.query<Mandate, [string]>("SELECT * FROM mandates WHERE owner_id = ? ORDER BY created_at DESC LIMIT 1").get(ownerId) ?? null; // newest: the demo buyer gets a fresh one per day
 }
 
 /** Buyer edits the two caps. Neither may drop below what is already committed. */

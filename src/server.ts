@@ -46,12 +46,14 @@ const agentDeps: AgentDeps = { db, env };
 const demoBuyer = upsertUser(db, { provider: "dev", providerUserId: "buyer", name: "Demo Buyer", email: env.BUYER_SANDBOX_EMAIL || "buyer@dev.local" });
 const demoSeller = upsertUser(db, { provider: "dev", providerUserId: "seller", name: "Demo Seller", email: config.sellerEmail || "seller@dev.local" });
 const seedAgent = ensureSeedAgent(db, demoSeller.id);
-const DEMO_MANDATE_ID = "default";
+/**
+ * The demo buyer's mandate is reissued per UTC day (`demo-YYYY-MM-DD`) so repeated demo runs never
+ * exhaust the aggregate cap; the caps themselves stay small so the mandate check is visible in the demo.
+ * Category stays pinned (part of the demo); the seller is open so the demo buyer can also award marketplace quotes.
+ */
 function demoMandate() {
-  // Category stays pinned (the mandate check is part of the demo); the seller is open so the demo buyer can also award marketplace quotes.
-  const m = getMandate(db, DEMO_MANDATE_ID) ?? createMandate(db, { id: DEMO_MANDATE_ID, maxPerPactCents: 5000, maxAggregateCents: 50_000, allowedCategory: "product_descriptions", allowedSeller: ANY, ownerId: demoBuyer.id });
-  if (!m.owner_id || m.allowed_seller !== ANY) db.run("UPDATE mandates SET owner_id = ?, allowed_seller = ? WHERE id = ?", [demoBuyer.id, ANY, m.id]);
-  return getMandate(db, DEMO_MANDATE_ID)!;
+  const id = `demo-${new Date().toISOString().slice(0, 10)}`;
+  return getMandate(db, id) ?? createMandate(db, { id, maxPerPactCents: 5000, maxAggregateCents: 50_000, allowedCategory: "product_descriptions", allowedSeller: ANY, ownerId: demoBuyer.id });
 }
 demoMandate();
 
