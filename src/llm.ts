@@ -8,7 +8,9 @@
  *
  * OpenCode Go routes by model family: claude-* goes through its Anthropic
  * Messages endpoint, gpt-* / grok-* / muse-spark-* through the OpenAI Responses
- * endpoint, everything else through OpenAI Chat Completions.
+ * endpoint, everything else through OpenAI Chat Completions. Go also requires
+ * a stable `x-opencode-session` header per conversation (routing + prompt
+ * caching) and asks clients to send their own User-Agent.
  */
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
@@ -58,7 +60,14 @@ export interface Models {
   describe: string;
 }
 
-export function models(cfg: LlmConfig = loadLlmConfig()): Models {
+const USER_AGENT = "agentpact/0.1";
+
+/**
+ * Build the two models. `sessionId` should be stable for one conversation
+ * (e.g. one pact); it is only used by providers that route on it.
+ */
+export function models(cfg: LlmConfig = loadLlmConfig(), sessionId: string = crypto.randomUUID()): Models {
+  const headers = { "x-opencode-session": sessionId, "User-Agent": USER_AGENT };
   const make = (id: string): LanguageModel => {
     switch (cfg.provider) {
       case "anthropic":
@@ -71,9 +80,9 @@ export function models(cfg: LlmConfig = loadLlmConfig()): Models {
       }
       case "opencode": {
         const base = cfg.baseUrl ?? OPENCODE_GO;
-        if (id.startsWith("claude-")) return createAnthropic({ apiKey: cfg.apiKey, baseURL: `${base}/anthropic/v1` })(id);
-        if (/^(gpt-|grok-|muse-spark-)/.test(id)) return createOpenAI({ apiKey: cfg.apiKey, baseURL: `${base}/openai/v1` }).responses(id);
-        return createOpenAICompatible({ name: "opencode-go", apiKey: cfg.apiKey, baseURL: `${base}/openai/v1` }).chatModel(id);
+        if (id.startsWith("claude-")) return createAnthropic({ apiKey: cfg.apiKey, baseURL: `${base}/anthropic/v1`, headers })(id);
+        if (/^(gpt-|grok-|muse-spark-)/.test(id)) return createOpenAI({ apiKey: cfg.apiKey, baseURL: `${base}/openai/v1`, headers }).responses(id);
+        return createOpenAICompatible({ name: "opencode-go", apiKey: cfg.apiKey, baseURL: `${base}/openai/v1`, headers, supportsStructuredOutputs: true }).chatModel(id);
       }
     }
   };
