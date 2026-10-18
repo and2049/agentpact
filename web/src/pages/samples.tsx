@@ -1,7 +1,6 @@
 import * as React from "react"
 import { Link, useNavigate } from "react-router-dom"
 
-import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Notice, PageHeader, Section, StatusBadge } from "@/components/primitives"
@@ -79,7 +78,11 @@ export function SamplesPage() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {data?.demos.length ? (
+            {!data ? (
+              <TableRow>
+                <TableCell colSpan={5} className="pl-4 text-muted-foreground">Loading…</TableCell>
+              </TableRow>
+            ) : data.demos.length ? (
               data.demos.map((p) => (
                 <TableRow key={p.id}>
                   <TableCell className="pl-4">
@@ -99,7 +102,6 @@ export function SamplesPage() {
           </TableBody>
         </Table>
       </Section>
-      {!data && !error && <Button variant="ghost" disabled><Spinner data-icon="inline-start" />Loading</Button>}
     </>
   )
 }
