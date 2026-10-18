@@ -15,6 +15,7 @@ import type { FlowDeps } from "./payments/flow";
 import { listOps } from "./payments/ops";
 import { authorizationForPact, captureForPact, payoutForPact } from "./payments/resources";
 import { applyWebhook, type WebhookEvent } from "./webhooks";
+import { cookieHeader, createSession, deleteSession, devLogin, parseCookies, SESSION_COOKIE, SESSION_TTL_MS, upsertUser, userForSession, userFromPayPal, type PayPalUserInfo } from "./auth";
 
 const config = loadConfig();
 const db = openDb(config.dbPath);
@@ -183,21 +184,49 @@ app.get("/auth/paypal/start", (c) => {
 app.get("/auth/paypal/callback", async (c) => {
   const code = c.req.query("code");
   const state = c.req.query("state");
-  const cookie = (c.req.header("cookie") ?? "").match(/(?:^|;\s*)lipp_state=([^;]+)/)?.[1];
-  if (!code) return c.json({ pass: false, error: "no code", query: c.req.query() }, 400);
-  if (!state || state !== cookie) return c.json({ pass: false, error: "state mismatch", state, cookie: Boolean(cookie) }, 400);
+  const cookies = parseCookies(c.req.header("cookie"));
+  if (!code) return c.json({ error: "no code", query: c.req.query() }, 400);
+  if (!state || state !== cookies.lipp_state) return c.json({ error: "state mismatch" }, 400);
   const tokenRes = await fetch(`${config.paypalBase}/v1/oauth2/token`, {
     method: "POST",
     headers: { Authorization: "Basic " + btoa(`${config.clientId}:${config.clientSecret}`), "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({ grant_type: "authorization_code", code }).toString(),
   });
   const token = (await tokenRes.json()) as { access_token?: string; scope?: string; error_description?: string };
-  if (!token.access_token) return c.json({ pass: false, step: "token", status: tokenRes.status, error: token.error_description ?? token }, 502);
+  if (!token.access_token) return c.json({ step: "token", status: tokenRes.status, error: token.error_description ?? token }, 502);
   const infoRes = await fetch(`${config.paypalBase}/v1/identity/oauth2/userinfo?schema=paypalv1.1`, { headers: { Authorization: `Bearer ${token.access_token}` } });
-  const info = (await infoRes.json()) as Record<string, unknown>;
+  const info = (await infoRes.json()) as PayPalUserInfo;
   appendSpike("lipp.userinfo", { status: infoRes.status, scope: token.scope, keys: Object.keys(info) });
-  const emails = (info.emails as Array<{ value: string; primary?: boolean }> | undefined) ?? [];
-  return c.json({ pass: Boolean(info.user_id) && emails.length > 0, scope: token.scope, userinfo: info });
+  const mapped = userFromPayPal(info);
+  if (!mapped) return c.json({ step: "userinfo", status: infoRes.status, error: "user_id or email missing", keys: Object.keys(info) }, 502);
+  const user = upsertUser(db, { provider: "paypal", ...mapped });
+  const session = createSession(db, user.id);
+  const secure = publicOrigin(c).startsWith("https");
+  c.header("Set-Cookie", cookieHeader(SESSION_COOKIE, session.id, { maxAge: SESSION_TTL_MS / 1000, secure }), { append: true });
+  c.header("Set-Cookie", "lipp_state=; Path=/; Max-Age=0", { append: true });
+  return c.redirect("/me");
+});
+
+/** Passcode-gated seeded accounts (fallback when Log in with PayPal is unavailable). */
+app.post("/auth/dev", async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as { passcode?: string; who?: string };
+  const user = devLogin(db, { passcode: body.passcode ?? "", who: body.who ?? "", env: process.env });
+  if (!user) return c.json({ error: "dev login disabled or invalid" }, 403);
+  const session = createSession(db, user.id);
+  c.header("Set-Cookie", cookieHeader(SESSION_COOKIE, session.id, { maxAge: SESSION_TTL_MS / 1000, secure: publicOrigin(c).startsWith("https") }));
+  return c.json({ user });
+});
+
+app.get("/me", (c) => {
+  const user = userForSession(db, parseCookies(c.req.header("cookie"))[SESSION_COOKIE]);
+  if (!user) return c.json({ user: null, login: "/auth/paypal/start" }, 401);
+  return c.json({ user });
+});
+
+app.post("/logout", (c) => {
+  deleteSession(db, parseCookies(c.req.header("cookie"))[SESSION_COOKIE]);
+  c.header("Set-Cookie", cookieHeader(SESSION_COOKIE, "", { maxAge: 0, secure: false }));
+  return c.json({ ok: true });
 });
 
 function appendSpike(type: string, payload: unknown) {
