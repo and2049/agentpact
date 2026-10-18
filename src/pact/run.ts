@@ -32,14 +32,24 @@ export interface RunDeps {
   maxPolls?: number;
 }
 
+const say = (db: Db, pactId: string, role: "buyer" | "seller" | "verifier" | "platform", text: string, extra: Record<string, unknown> = {}) =>
+  appendEvent(db, pactId, "agent.message", { role, text, ...extra });
+
 export interface RunArgs {
   mandateId: string;
   job: JobSpec;
   scenario: Scenario;
+  /** Reuse a pact already created by preparePact (so callers can return its id before the run starts). */
+  pactId?: string;
 }
 
-const say = (db: Db, pactId: string, role: "buyer" | "seller" | "verifier" | "platform", text: string, extra: Record<string, unknown> = {}) =>
-  appendEvent(db, pactId, "agent.message", { role, text, ...extra });
+/** Create the pact row and the opening events synchronously; the run itself happens in runPact. */
+export function preparePact(db: Db, args: { mandateId: string; job: JobSpec; scenario: Scenario }): PactRow {
+  const pact = createPact(db, args.mandateId, args.job);
+  appendEvent(db, pact.id, "run.started", { scenario: args.scenario, jobId: args.job.id, itemCount: args.job.skus.length, maxUnitPriceCents: args.job.maxUnitPriceCents });
+  say(db, pact.id, "buyer", `Posting job "${args.job.title}": ${args.job.skus.length} items, max ${args.job.maxUnitPriceCents}¢ each. Payment is per accepted item after verification.`);
+  return pact;
+}
 
 export async function runPact(deps: RunDeps, args: RunArgs): Promise<PactRow> {
   const db = deps.flow.db;
@@ -47,10 +57,9 @@ export async function runPact(deps: RunDeps, args: RunArgs): Promise<PactRow> {
   const mandate = getMandate(db, args.mandateId);
   if (!mandate) throw new Error("mandate not found");
 
-  const pact = createPact(db, mandate.id, job);
+  const pact = args.pactId ? getPact(db, args.pactId) : preparePact(db, { mandateId: mandate.id, job, scenario });
+  if (!pact) throw new Error("pact not found");
   const id = pact.id;
-  appendEvent(db, id, "run.started", { scenario, jobId: job.id, itemCount: job.skus.length, maxUnitPriceCents: job.maxUnitPriceCents });
-  say(db, id, "buyer", `Posting job "${job.title}": ${job.skus.length} items, max ${job.maxUnitPriceCents}¢ each. Payment is per accepted item after verification.`);
 
   // 1. Quote
   const quote = await deps.agents.quote(job);
