@@ -12,14 +12,15 @@ import type { Scenario } from "./faults";
 import { sampleJob } from "./jobs/sample";
 import { loadLlmConfig, models } from "./llm";
 import { ANY, createMandate, getMandate, MandateViolation, updateMandateCaps } from "./mandate";
-import { AgentError, AgentInput, createAgent, deleteAgentKey, ensureSeedAgent, getAgent, listAgents, llmConfigForAgent, publicAgent, updateAgent, type AgentDeps } from "./market/agents";
-import { awardJob, canSeeJobDetails, createJob, eligibleAgents, getJob, JobError, JobInput, jobSpecOf, listJobs, listQuotes, mandateForBuyer, publicJob, recordQuote, reopenJobFor, TEMPLATES } from "./market/jobs";
+import { AgentError, AgentInput, AgentPatch, createAgent, deleteAgentKey, ensureSeedAgent, getAgent, listAgents, llmConfigForAgent, publicAgent, updateAgent, type AgentDeps } from "./market/agents";
+import { redactedError, redactSecrets } from "./redact";
+import { awardJob, canSeeJobDetails, createJob, getJob, JobError, JobInput, jobSpecOf, listJobs, listQuotes, mandateForBuyer, publicJob, recordQuote, reopenJobFor, reserveQuoteSlots, TEMPLATES } from "./market/jobs";
 import { getPact, jobOf } from "./pact/machine";
 import { preparePact } from "./pact/run";
 import { TERMINAL, type Agents } from "./pact/stages";
 import type { PactRow } from "./pact/types";
 import { PayPalClient } from "./paypal/client";
-import { completeCheckout } from "./payments/checkout";
+import { beginCheckout, completeCheckout } from "./payments/checkout";
 import type { FlowDeps } from "./payments/flow";
 import { listOps } from "./payments/ops";
 import { authorizationForPact, captureForPact, payoutForPact } from "./payments/resources";
@@ -53,42 +54,54 @@ const seedAgent = ensureSeedAgent(db, demoSeller.id);
  */
 function demoMandate() {
   const id = `demo-${new Date().toISOString().slice(0, 10)}`;
-  return getMandate(db, id) ?? createMandate(db, { id, maxPerPactCents: 5000, maxAggregateCents: 50_000, allowedCategory: "product_descriptions", allowedSeller: ANY, ownerId: demoBuyer.id });
+  // Unowned on purpose: the demo buyer's marketplace awards use its own stable mandate (mandateForBuyer).
+  return getMandate(db, id) ?? createMandate(db, { id, maxPerPactCents: 5000, maxAggregateCents: 50_000, allowedCategory: "product_descriptions", allowedSeller: ANY });
 }
+db.run("UPDATE mandates SET owner_id = NULL WHERE id LIKE 'demo-%' AND owner_id IS NOT NULL"); // migrate the first daily mandate
 demoMandate();
 
 // ---------- agents per pact ----------
+/** Errors from a seller's provider may echo the credential; scrub before anything persists them. */
+async function guarded<T>(fn: () => Promise<T>, secrets: Array<string | undefined>): Promise<T> {
+  try {
+    return await fn();
+  } catch (e) {
+    throw redactedError(e, secrets);
+  }
+}
 function agentsFor(pact: PactRow): Agents {
   if (pact.kind === "demo" || !pact.agent_id) return realAgents(loadLlmConfig(env), pact.id).agents;
   const row = getAgent(db, pact.agent_id);
-  const frozen = pact.frozen_json ? (JSON.parse(pact.frozen_json) as { agent?: { system_prompt?: string } }) : {};
+  const frozen = pact.frozen_json ? (JSON.parse(pact.frozen_json) as { agent?: { provider?: string; model?: string; system_prompt?: string } }) : {};
   const platform = realAgents(loadLlmConfig(env), pact.id).agents;
   return {
     quote: platform.quote,
     decide: platform.decide,
     produce: async (job, onBatch) => {
       if (!row) throw new Error("agent no longer exists");
-      const cfg = await llmConfigForAgent(agentDeps, row);
-      return produceArtifact(job, models(cfg, pact.id).main, { batchSize: 5, concurrency: 4, onBatch, sellerPrompt: frozen.agent?.system_prompt ?? row.system_prompt });
+      const cfg = await llmConfigForAgent(agentDeps, row, frozen.agent); // frozen provider/model, current credential
+      return guarded(() => produceArtifact(job, models(cfg, pact.id).main, { batchSize: 5, concurrency: 4, onBatch, sellerPrompt: frozen.agent?.system_prompt ?? row.system_prompt }), [cfg.apiKey]);
     },
     rubric: llmRubric(models(loadLlmConfig(env), pact.id).fast), // the verifier always runs on the platform's configuration
   };
 }
 
-/** Quote an open job from every eligible agent (bounded). LLM failures fall back to a deterministic quote. */
+/** Quote an open job from the persisted agent selection (bounded). LLM failures fall back to a deterministic quote. */
 async function quoteOpenJob(jobId: string) {
   const job = getJob(db, jobId);
   if (!job || job.status !== "OPEN") return;
-  for (const agent of eligibleAgents(db, job)) {
+  for (const agent of reserveQuoteSlots(db, job)) {
     const spec = jobSpecOf(job, "");
     const items = spec.skus.length;
     let q: { unitPriceCents: number; etaMinutes: number; message: string };
+    let key: string | undefined;
     try {
       const cfg = await llmConfigForAgent(agentDeps, agent);
-      q = await llmQuote(spec, models(cfg, `quote-${job.id}-${agent.id}`).main);
+      key = cfg.apiKey;
+      q = await guarded(() => llmQuote(spec, models(cfg, `quote-${job.id}-${agent.id}`).main), [key]);
     } catch (e) {
       q = { unitPriceCents: Math.round((agent.min_unit_price_cents + Math.min(agent.max_unit_price_cents, job.max_unit_price_cents)) / 2), etaMinutes: Math.max(2, items), message: `Automated quote from ${agent.name}: ${items} items, paid per accepted item.` };
-      console.error(`quote via LLM failed for agent ${agent.id}: ${(e as Error).message}`);
+      console.error(`quote via LLM failed for agent ${agent.id}: ${redactSecrets(String((e as Error).message), [key])}`);
     }
     recordQuote(db, job, agent, q);
   }
@@ -154,7 +167,16 @@ app.onError((err, c) => {
 });
 
 const STARTED_AT = new Date().toISOString();
-app.get("/health", (c) => c.json({ ok: true, env: config.paypalEnv, startedAt: STARTED_AT }));
+app.get("/health", (c) => {
+  const n = (sql: string) => db.query<{ n: number }, []>(sql).get()!.n;
+  return c.json({
+    ok: true,
+    env: config.paypalEnv,
+    startedAt: STARTED_AT,
+    tasks: { queued: n("SELECT count(*) AS n FROM tasks WHERE status = 'queued'"), running: n("SELECT count(*) AS n FROM tasks WHERE status = 'running'"), failed: n("SELECT count(*) AS n FROM tasks WHERE status = 'failed'") },
+    webhookEvents: n("SELECT count(*) AS n FROM webhook_events"),
+  });
+});
 
 /** Browser-safe configuration for the thin client. */
 app.get("/api/config", (c) => c.json({ clientId: config.clientId, env: config.paypalEnv, devLogin: Boolean(env.DEV_LOGIN_PASSCODE), keyCustody: Boolean(env.AGENT_KEY_SECRET), templates: Object.entries(TEMPLATES).map(([id, t]) => ({ id, name: t.name, rubric: t.rubric })) }));
@@ -269,8 +291,8 @@ app.get("/api/agents/:id", (c) => {
 });
 app.patch("/api/agents/:id", async (c) => {
   const user = requireUser(c);
-  const patch = await body(c, AgentInput.partial());
-  return c.json(publicAgent(db, await updateAgent(agentDeps, user.id, c.req.param("id"), patch as Partial<AgentInput>), user.id));
+  const patch = await body(c, AgentPatch);
+  return c.json(publicAgent(db, await updateAgent(agentDeps, user.id, c.req.param("id"), patch), user.id));
 });
 app.delete("/api/agents/:id/key", (c) => {
   const user = requireUser(c);
@@ -369,20 +391,39 @@ app.get("/api/pacts/:id", (c) => {
 });
 
 /** Event stream for one pact: replays history, then tails new events. */
+const isTerminal = (p: PactRow) => TERMINAL.includes(p.status) || (p.status === "SETTLED" && p.settlement_kind === "void");
 app.get("/api/pacts/:id/events", (c) => {
   const { pact } = requirePactView(c, c.req.param("id"));
   const id = pact.id;
   return streamSSE(c, async (stream) => {
-    let last = Number(c.req.query("after") ?? 0);
+    // Reconnects resume from the browser's Last-Event-ID; the stream ends only when the pact is genuinely terminal
+    // (a historical run.finished from a failed attempt does not end it).
+    let last = Number(c.req.header("last-event-id") ?? c.req.query("after") ?? 0) || 0;
     while (!stream.closed) {
       for (const e of listEvents(db, id, last)) {
         last = e.seq;
         await stream.writeSSE({ id: String(e.seq), event: e.type, data: e.payload_json });
-        if (e.type === "run.finished" || e.type === "pact.rejected") return;
+      }
+      const cur = getPact(db, id);
+      if (!cur || isTerminal(cur)) {
+        await stream.writeSSE({ id: String(last), event: "stream.end", data: JSON.stringify({ status: cur?.status ?? null }) });
+        return;
       }
       await stream.sleep(400);
     }
   });
+});
+
+/** Buyer retries order creation when the award committed but the order never got created (timeout / crash). */
+app.post("/api/pacts/:id/checkout", async (c) => {
+  const user = requireUser(c);
+  const id = c.req.param("id");
+  const pact = getPact(db, id);
+  if (!pact) throw bad(404, "not found");
+  if (pact.kind !== "market" || pact.buyer_id !== user.id) throw bad(403, "not your pact");
+  const r = await withPactLock(id, () => beginCheckout(flow, id));
+  if (!r.ok && r.pact && TERMINAL.includes(r.pact.status)) reopenJobFor(db, r.pact);
+  return c.json(r.ok ? { ok: true, orderId: r.pact.order_id, status: r.pact.status } : { ok: false, code: r.code, error: r.message, status: r.pact?.status ?? null }, r.ok ? 200 : 409);
 });
 
 /** Buyer approved in PayPal: verify ownership and the order, authorize, HELD, then start the work. */

@@ -2,8 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { upsertUser } from "../src/auth";
 import { openDb } from "../src/db";
 import { getMandate } from "../src/mandate";
-import { createAgent, ensureSeedAgent, publicAgent, type AgentDeps } from "../src/market/agents";
-import { awardJob, canSeeJobDetails, createJob, eligibleAgents, getJob, listQuotes, mandateForBuyer, recordQuote, reopenJobFor } from "../src/market/jobs";
+import { AgentInput, AgentPatch, createAgent, ensureSeedAgent, llmConfigForAgent, modelAllowed, publicAgent, updateAgent, type AgentDeps } from "../src/market/agents";
+import { redactedError, redactSecrets } from "../src/redact";
+import { awardJob, canSeeJobDetails, createJob, eligibleAgents, getJob, listQuotes, mandateForBuyer, recordQuote, reopenJobFor, reserveQuoteSlots } from "../src/market/jobs";
 import { getPact } from "../src/pact/machine";
 import { completeCheckout, expireCheckouts } from "../src/payments/checkout";
 import type { FlowDeps } from "../src/payments/flow";
@@ -42,7 +43,7 @@ describe("marketplace", () => {
   });
 
   test("award freezes the pact, reserves the buyer mandate and creates the approval order; duplicates are refused", async () => {
-    const { db, buyer, seller, agent, flow, job, pp } = setup();
+    const { db, buyer, seller, other, agent, flow, job, pp } = setup();
     const q = recordQuote(db, job, agent, { unitPriceCents: 100, etaMinutes: 3, message: "Happy to." });
     const r = await awardJob({ db, flow }, { jobId: job.id, quoteId: q.id, buyerId: buyer.id });
     expect(r.checkout.ok).toBe(true);
@@ -59,8 +60,14 @@ describe("marketplace", () => {
     const m = mandateForBuyer(db, buyer.id);
     expect(m.reserved_cents).toBe(300);
     expect(m.allowed_seller).toBe("*");
-    await expect(awardJob({ db, flow }, { jobId: job.id, quoteId: q.id, buyerId: buyer.id })).rejects.toThrow(/AWARDED/);
+    // Same quote again: idempotent (returns the same pact, no second order). A different quote: refused.
+    const same = await awardJob({ db, flow }, { jobId: job.id, quoteId: q.id, buyerId: buyer.id });
+    expect(same.pact.id).toBe(pact.id);
     expect(pp.orders.size).toBe(1);
+    const agent2 = ensureSeedAgent(db, other.id);
+    const q2 = recordQuote(db, job, agent2, { unitPriceCents: 90, etaMinutes: 3, message: "" });
+    await expect(awardJob({ db, flow }, { jobId: job.id, quoteId: q2.id, buyerId: buyer.id })).rejects.toThrow(/AWARDED/);
+    expect(db.query<{ n: number }, []>("SELECT count(*) AS n FROM pacts").get()!.n).toBe(1);
   });
 
   test("only the buyer can award; a quote from another job is rejected", async () => {
@@ -87,7 +94,7 @@ describe("marketplace", () => {
     const r = await awardJob({ db, flow }, { jobId: job.id, quoteId: q.id, buyerId: buyer.id });
     db.run("UPDATE pacts SET checkout_deadline = '2000-01-01T00:00:00.000Z' WHERE id = ?", [r.pact.id]);
     const expired = await expireCheckouts(flow);
-    expect(expired).toEqual([r.pact.id]);
+    expect(expired.expired).toEqual([r.pact.id]);
     reopenJobFor(db, getPact(db, r.pact.id)!);
     expect(getJob(db, job.id)!.status).toBe("OPEN");
     expect(getJob(db, job.id)!.pact_id).toBeNull();
@@ -120,5 +127,68 @@ describe("marketplace", () => {
     expect(pub.has_key).toBe(true);
     expect("has_key" in (publicAgent(db, a, seller.id) as Record<string, unknown>)).toBe(false);
     await expect(createAgent(deps, other.id, { name: "Free ride", description: "", provider: "platform", model: "", systemPrompt: "", minUnitPriceCents: 10, maxUnitPriceCents: 100, maxItemsPerJob: 20, maxQuotesPerDay: 20, status: "active" })).rejects.toThrow(/reserved/);
+  });
+
+  test("award resume: order creation timed out -> second award call retries with the same op and does not create a second pact", async () => {
+    const { db, buyer, agent, flow, job, pp } = setup();
+    const q = recordQuote(db, job, agent, { unitPriceCents: 100, etaMinutes: 3, message: "" });
+    pp.fault("createApprovalOrder", { kind: "timeout_before" });
+    const r1 = await awardJob({ db, flow }, { jobId: job.id, quoteId: q.id, buyerId: buyer.id });
+    expect(r1.checkout.ok).toBe(false);
+    expect(!r1.checkout.ok && r1.checkout.code).toBe("unknown");
+    expect(r1.pact.status).toBe("AGREED");
+    expect(r1.pact.order_id).toBeNull();
+    expect(getJob(db, job.id)!.status).toBe("AWARDED");
+    const r2 = await awardJob({ db, flow }, { jobId: job.id, quoteId: q.id, buyerId: buyer.id });
+    expect(r2.checkout.ok).toBe(true);
+    expect(r2.pact.id).toBe(r1.pact.id);
+    expect(r2.pact.order_id).toMatch(/^O/);
+    expect(db.query<{ n: number }, []>("SELECT count(*) AS n FROM pacts").get()!.n).toBe(1);
+    expect(pp.orders.size).toBe(1);
+  });
+
+  test("quote slots are persisted before quoting and a resumed run fills only those", () => {
+    const { db, seller, agent, job } = setup();
+    const first = reserveQuoteSlots(db, job);
+    expect(first.map((a) => a.id)).toEqual([agent.id]);
+    expect(listQuotes(db, job.id)[0]!.status).toBe("pending");
+    // another agent becomes eligible after the selection was made
+    ensureSeedAgent(db, seller.id); // same owner, already exists -> returns the same row
+    const again = reserveQuoteSlots(db, job);
+    expect(again.map((a) => a.id)).toEqual([agent.id]);
+    const filled = recordQuote(db, job, agent, { unitPriceCents: 100, etaMinutes: 3, message: "ok" });
+    expect(filled.status).toBe("open");
+    expect(reserveQuoteSlots(db, job)).toEqual([]);
+  });
+
+  test("agent PATCH schema accepts partial bodies and validates the merged agent; model allowlist", async () => {
+    const { db, other } = setup();
+    expect(AgentPatch.safeParse({ status: "paused" }).success).toBe(true);
+    expect(AgentPatch.safeParse({ minUnitPriceCents: -1 }).success).toBe(false);
+    expect(modelAllowed("openai", "gpt-5.5")).toBe(true);
+    expect(modelAllowed("openai", "claude-sonnet-5-5")).toBe(false);
+    expect(modelAllowed("anthropic", "claude-sonnet-5-5")).toBe(true);
+    expect(AgentInput.safeParse({ name: "x1", provider: "openai", model: "llama-9", apiKey: "sk-test-1234567890", minUnitPriceCents: 1, maxUnitPriceCents: 2 }).success).toBe(false);
+    const deps: AgentDeps = { db, env: { AGENT_KEY_SECRET: "test-secret" } };
+    const a = await createAgent(deps, other.id, { name: "Mine", description: "", provider: "openai", model: "gpt-5.5", apiKey: "sk-test-1234567890", systemPrompt: "", minUnitPriceCents: 10, maxUnitPriceCents: 100, maxItemsPerJob: 20, maxQuotesPerDay: 20, status: "active" });
+    const paused = await updateAgent(deps, other.id, a.id, { status: "paused" });
+    expect(paused.status).toBe("paused");
+    expect(paused.description).toBe("");
+    expect(paused.model).toBe("gpt-5.5");
+    await expect(updateAgent(deps, other.id, a.id, { minUnitPriceCents: 500 })).rejects.toThrow();
+    // frozen provider/model win over a later edit; the credential is current
+    await updateAgent(deps, other.id, a.id, { model: "gpt-5.5-mini" });
+    const cfg = await llmConfigForAgent(deps, (await updateAgent(deps, other.id, a.id, {})), { provider: "openai", model: "gpt-5.5" });
+    expect(cfg.model).toBe("gpt-5.5");
+    expect(cfg.apiKey).toBe("sk-test-1234567890");
+  });
+
+  test("redaction: a provider error echoing the credential never reaches persisted text", () => {
+    const key = "sk-live-SENTINEL-0123456789abcdef";
+    const e = redactedError(new Error(`401 Unauthorized: invalid api key ${key} for project`), [key]);
+    expect(e.message).not.toContain("SENTINEL");
+    expect(e.message).toContain("[redacted]");
+    expect(redactSecrets("token=abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG")).not.toContain("abcdefghijkl");
+    expect(redactSecrets("order 5VC69492KA9111029 failed")).toContain("5VC69492KA9111029"); // short ids survive
   });
 });

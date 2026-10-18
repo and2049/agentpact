@@ -5,7 +5,7 @@
 import { z } from "zod";
 import { appendEvent, now, type Db } from "../db";
 import { ANY, createMandate, mandateForOwner, type Mandate } from "../mandate";
-import { createPact, pactHash, transition } from "../pact/machine";
+import { createPact, getPact, pactHash, transition } from "../pact/machine";
 import { say } from "../pact/stages";
 import { JobSpec, SkuFacts, type Offer, type PactRow } from "../pact/types";
 import { beginCheckout, type CheckoutResult } from "../payments/checkout";
@@ -63,7 +63,7 @@ export interface QuoteRow {
   unit_price_cents: number;
   eta_minutes: number;
   message: string;
-  status: "open" | "awarded" | "lost";
+  status: "pending" | "open" | "awarded" | "lost";
   created_at: string;
 }
 
@@ -149,16 +149,35 @@ export function eligibleAgents(db: Db, job: JobRow, limit = 5): AgentRow[] {
   return out;
 }
 
-/** Record one quote, clamped into the agent's band and the job max. Idempotent per (job, agent). */
+/**
+ * Persist the agent selection for a job before any model is called, so a crash mid-quoting resumes
+ * exactly these agents instead of selecting more. Returns the agents still to be quoted.
+ */
+export function reserveQuoteSlots(db: Db, job: JobRow, limit = 5): AgentRow[] {
+  const pending = db.query<{ agent_id: string }, [string]>("SELECT agent_id FROM quotes WHERE job_id = ? AND status = 'pending'").all(job.id).map((r) => r.agent_id);
+  const any = db.query<{ n: number }, [string]>("SELECT count(*) AS n FROM quotes WHERE job_id = ?").get(job.id)!.n;
+  if (any === 0) {
+    for (const a of eligibleAgents(db, job, limit)) {
+      db.run("INSERT OR IGNORE INTO quotes (id, job_id, agent_id, seller_id, unit_price_cents, eta_minutes, message, status, created_at) VALUES (?, ?, ?, ?, 0, 0, '', 'pending', ?)", [crypto.randomUUID(), job.id, a.id, a.owner_id, now()]);
+      pending.push(a.id);
+    }
+  }
+  return pending.map((id) => getAgent(db, id)).filter((a): a is AgentRow => Boolean(a));
+}
+
+/** Record one quote, clamped into the agent's band and the job max. Idempotent per (job, agent); fills a pending slot if one exists. */
 export function recordQuote(db: Db, job: JobRow, agent: AgentRow, q: { unitPriceCents: number; etaMinutes: number; message: string }): QuoteRow {
   const hi = Math.min(agent.max_unit_price_cents, job.max_unit_price_cents);
   const price = Math.max(agent.min_unit_price_cents, Math.min(hi, Math.round(q.unitPriceCents)));
-  const id = crypto.randomUUID();
-  db.run(
-    "INSERT OR IGNORE INTO quotes (id, job_id, agent_id, seller_id, unit_price_cents, eta_minutes, message, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?)",
-    [id, job.id, agent.id, agent.owner_id, price, Math.max(1, Math.round(q.etaMinutes)), q.message.slice(0, 400), now()],
-  );
-  return db.query<QuoteRow, [string, string]>("SELECT * FROM quotes WHERE job_id = ? AND agent_id = ?").get(job.id, agent.id)!;
+  const eta = Math.max(1, Math.round(q.etaMinutes));
+  const msg = q.message.slice(0, 400);
+  const tx = db.transaction(() => {
+    const existing = db.query<QuoteRow, [string, string]>("SELECT * FROM quotes WHERE job_id = ? AND agent_id = ?").get(job.id, agent.id);
+    if (existing?.status === "pending") db.run("UPDATE quotes SET unit_price_cents = ?, eta_minutes = ?, message = ?, status = 'open', created_at = ? WHERE id = ?", [price, eta, msg, now(), existing.id]);
+    else if (!existing) db.run("INSERT INTO quotes (id, job_id, agent_id, seller_id, unit_price_cents, eta_minutes, message, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?)", [crypto.randomUUID(), job.id, agent.id, agent.owner_id, price, eta, msg, now()]);
+    return db.query<QuoteRow, [string, string]>("SELECT * FROM quotes WHERE job_id = ? AND agent_id = ?").get(job.id, agent.id)!;
+  });
+  return tx();
 }
 
 /** Buyer mandate: created on first use with generous sandbox defaults and no category/seller pin. */
@@ -181,6 +200,14 @@ export async function awardJob(deps: { db: Db; flow: FlowDeps }, args: { jobId: 
   const job = getJob(db, args.jobId);
   if (!job) throw new JobError("not_found", "job not found");
   if (job.buyer_id !== args.buyerId) throw new JobError("forbidden", "not your job");
+  if (job.status === "AWARDED" && job.pact_id) {
+    // Resume: the award committed but order creation did not complete (timeout / crash). Same op id, same request id.
+    const existing = getPact(db, job.pact_id);
+    if (existing && existing.status === "AGREED" && existing.quote_id === args.quoteId) {
+      const checkout = await beginCheckout(deps.flow, existing.id);
+      return { pact: checkout.pact ?? existing, checkout };
+    }
+  }
   if (job.status !== "OPEN") throw new JobError("state", `job is ${job.status}`);
   const quote = getQuote(db, args.quoteId);
   if (!quote || quote.job_id !== job.id) throw new JobError("invalid", "quote does not belong to this job");
@@ -230,7 +257,7 @@ export function reopenJobFor(db: Db, pact: PactRow) {
   if (pact.kind !== "market" || !pact.job_id) return;
   if (pact.status !== "HOLD_FAILED" && pact.status !== "CHECKOUT_EXPIRED") return;
   db.run("UPDATE jobs SET status = 'OPEN', pact_id = NULL, updated_at = ? WHERE id = ? AND pact_id = ?", [now(), pact.job_id, pact.id]);
-  db.run("UPDATE quotes SET status = 'open' WHERE job_id = ?", [pact.job_id]);
+  db.run("UPDATE quotes SET status = 'open' WHERE job_id = ? AND status IN ('awarded', 'lost')", [pact.job_id]);
 }
 
 /** Public job-board view: no items, no quotes. */

@@ -283,7 +283,13 @@
     async function renderApprove(x) {
       const box = $("#approve");
       if (!x.can_approve) {
-        box.hidden = true;
+        const stuck = x.viewer?.role === "buyer" && x.pact.kind === "market" && x.pact.status === "AGREED" && !x.pact.order_id;
+        box.hidden = !stuck;
+        if (stuck && !box.dataset.retry) {
+          box.dataset.retry = "1";
+          box.innerHTML = `<div><b>PayPal order not created yet</b><p class="muted">The award is recorded but the order creation did not complete. Retry creates it with the same idempotency key.</p></div><div><button class="btn" id="retry-checkout">Retry checkout</button></div>`;
+          $("#retry-checkout").addEventListener("click", async () => { try { await api(`/api/pacts/${id}/checkout`, { method: "POST" }); } catch (e) { alert(e.body?.error || e.message); } box.dataset.retry = ""; refresh(); });
+        }
         return;
       }
       box.hidden = false;
@@ -325,7 +331,7 @@
     }
 
     // events (replay + tail over SSE)
-    const EVENT_TYPES = ["run.started", "agent.message", "seller.progress", "fault.injected", "verifier.item", "webhook.received", "run.error", "run.retry", "run.finished", "pact.offered", "pact.agreed", "pact.rejected", "pact.held", "pact.hold_failed", "pact.checkout_expired", "pact.delivered", "pact.verified", "pact.settling", "pact.settled", "pact.settlement_failed", "pact.paid_out", "mandate.reserved", "mandate.violation", "checkout.order_created", "checkout.failed", "hold.failed", "hold.unknown", "settle.failed", "settle.unknown", "settle.capture_pending", "payout.sent", "payout.pending", "payout.not_sent"];
+    const EVENT_TYPES = ["stream.end", "run.stalled", "agent.message", "seller.progress", "fault.injected", "verifier.item", "webhook.received", "run.error", "run.retry", "run.finished", "pact.offered", "pact.agreed", "pact.rejected", "pact.held", "pact.hold_failed", "pact.checkout_expired", "pact.delivered", "pact.verified", "pact.settling", "pact.settled", "pact.settlement_failed", "pact.paid_out", "mandate.reserved", "mandate.violation", "checkout.order_created", "checkout.failed", "hold.failed", "hold.unknown", "settle.failed", "settle.unknown", "settle.capture_pending", "payout.sent", "payout.pending", "payout.not_sent"];
     const handle = (type, d) => {
       switch (type) {
         case "agent.message": return addMessage(d.role, d.text);
@@ -336,7 +342,7 @@
           return addSys(`fault injected: ${d.note}`, "warn");
         case "verifier.item": return setVerdict(d);
         case "pact.offered": unitPrice = d.unitPriceCents; return setStatus("OFFERED");
-        case "pact.agreed": setStatus("AGREED"); $("#t-auth").textContent = cents(d.totalCents); return;
+        case "pact.agreed": return setStatus("AGREED");
         case "checkout.order_created": return addSys(`PayPal order ${d.orderId} created for ${cents(d.amountCents)}; waiting for buyer approval`);
         case "pact.held": setStatus("HELD"); return addSys(`authorization ${d.authorizationId} created for ${cents(d.amountCents)}${d.via ? ` via ${d.via}` : ""}`, "ok");
         case "pact.delivered": return setStatus("DELIVERED");
@@ -351,6 +357,7 @@
         case "run.retry": return addSys(`retrying after an error (attempt ${d.attempt}): ${d.message}`, "warn");
         case "webhook.received": return addSys(`webhook ${d.type} → ${d.status}`);
         case "payout.sent": case "payout.pending": case "settle.capture_pending": return addSys(`${type}: ${d.status ?? d.itemStatus ?? ""}`);
+        case "run.stalled": return addSys(`stalled at ${d.stage}: ${d.message} (recovers on the next restart)`, "bad");
         case "run.finished": return addSys(`run finished: ${d.status}`, d.status === "error" ? "bad" : "ok");
       }
     };
@@ -361,9 +368,9 @@
         es.addEventListener(t, (ev) => {
           let d = {};
           try { d = JSON.parse(ev.data); } catch {}
+          if (t === "stream.end") { es.close(); es = null; refresh(); return; } // server ends the stream only when the pact is terminal
           handle(t, d);
-          if (t === "run.finished" || t === "pact.rejected") { es.close(); es = null; refresh(); }
-          if (t === "pact.held" || t === "pact.settled" || t === "pact.paid_out" || t === "pact.checkout_expired") refresh();
+          if (t === "pact.held" || t === "pact.settled" || t === "pact.paid_out" || t === "pact.checkout_expired" || t === "run.finished") refresh();
         });
       }
       es.onerror = () => refresh();

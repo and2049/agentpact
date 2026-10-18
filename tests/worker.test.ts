@@ -118,6 +118,77 @@ describe("worker", () => {
     expect(pp.captures.size).toBe(1);
   });
 
+  test("a seller stage that keeps failing is abandoned after 5 attempts: no delivery -> void, reservation released, run finished", async () => {
+    const { db, m, job, flow, pp } = setup();
+    let calls = 0;
+    const agents: Agents = { ...stubAgents(job), produce: async () => { calls++; throw new Error("model down"); } };
+    const w = new Worker(db, { flow, agentsFor: () => agents, pollMs: 1 });
+    const p = preparePact(db, { mandateId: m.id, job, scenario: "good" });
+    enqueue(db, p.id, "advance");
+    while (getPact(db, p.id)!.status !== "HELD") await w.tick();
+    for (let i = 0; i < 6; i++) {
+      db.run("UPDATE tasks SET run_after = '2000-01-01' WHERE subject_id = ?", [p.id]); // skip the backoff
+      await w.tick();
+    }
+    expect(calls).toBe(5);
+    await drain(w, 10);
+    const final = getPact(db, p.id)!;
+    expect(final.status).toBe("SETTLED");
+    expect(final.settlement_kind).toBe("void");
+    expect(final.accepted_count).toBe(0);
+    expect([...pp.auths.values()][0]!.status).toBe("VOIDED");
+    expect(getMandate(db, m.id)!.reserved_cents).toBe(0);
+    expect(getMandate(db, m.id)!.spent_cents).toBe(0);
+    const ev = listEvents(db, p.id).map((e) => e.type);
+    expect(ev).toContain("run.error");
+    expect(ev[ev.length - 1]).toBe("run.finished");
+    expect(listTasks(db, p.id)[0]!.status).toBe("done");
+  });
+
+  test("a payment stage that keeps failing is left stalled (not finished) and recovery re-queues it", async () => {
+    const { db, m, job, flow, pp } = setup();
+    const w = new Worker(db, { flow, agentsFor: () => stubAgents(job), pollMs: 1 });
+    const p = preparePact(db, { mandateId: m.id, job, scenario: "good" });
+    enqueue(db, p.id, "advance");
+    while (getPact(db, p.id)!.status !== "VERIFIED") await w.tick();
+    // PayPal outcomes (failed/unknown) never throw: they poll. Only a real exception exhausts retries;
+    // simulate one by removing the authorization row the settle stage depends on.
+    const authRow = db.query<{ id: string; order_id: string; raw_json: string }, [string]>("SELECT id, order_id, raw_json FROM authorizations WHERE pact_id = ?").get(p.id)!;
+    db.run("DELETE FROM authorizations WHERE pact_id = ?", [p.id]);
+    for (let i = 0; i < 6; i++) {
+      db.run("UPDATE tasks SET run_after = '2000-01-01' WHERE subject_id = ?", [p.id]);
+      await w.tick();
+    }
+    expect(getPact(db, p.id)!.status).toBe("VERIFIED");
+    expect(listTasks(db, p.id)[0]!.status).toBe("failed");
+    const ev = listEvents(db, p.id).map((e) => e.type);
+    expect(ev).toContain("run.stalled");
+    expect(ev).not.toContain("run.finished");
+    expect(pp.captures.size).toBe(0);
+    // operator restores the row (reconciliation) and restarts: recovery re-queues the pact and it completes
+    const { recordAuthorization } = await import("../src/payments/resources");
+    recordAuthorization(db, p.id, authRow.order_id, JSON.parse(authRow.raw_json));
+    w.recover();
+    await drain(w, 20);
+    expect(getPact(db, p.id)!.status).toBe("PAID_OUT");
+    expect(pp.captures.size).toBe(1);
+  });
+
+  test("settlement resumes after an unknown capture outcome (no capture row) instead of polling forever", async () => {
+    const { db, m, job, flow, pp } = setup();
+    const w = new Worker(db, { flow, agentsFor: () => stubAgents(job), pollMs: 1 });
+    const p = preparePact(db, { mandateId: m.id, job, scenario: "good" });
+    enqueue(db, p.id, "advance");
+    while (getPact(db, p.id)!.status !== "VERIFIED") await w.tick();
+    pp.fault("captureAuthorization", { kind: "timeout_after_success" });
+    await w.tick(); // capture happened at PayPal, we never saw the response
+    expect(getPact(db, p.id)!.status).toBe("SETTLING");
+    expect(db.query<{ n: number }, []>("SELECT count(*) AS n FROM captures").get()!.n).toBe(0);
+    await drain(w, 20);
+    expect(getPact(db, p.id)!.status).toBe("PAID_OUT");
+    expect(pp.captures.size).toBe(1); // the retry replayed the same request id
+  });
+
   test("a stage that throws is retried with backoff and gives up after 5 attempts with run.error", async () => {
     const { db, m, job, flow } = setup();
     let calls = 0;
@@ -132,12 +203,17 @@ describe("worker", () => {
     }
     expect(calls).toBe(5);
     const t = listTasks(db, p.id)[0]!;
-    expect(t.status).toBe("failed");
     expect(t.last_error).toContain("model down");
     const ev = listEvents(db, p.id).map((e) => e.type);
     expect(ev.filter((t) => t === "run.retry")).toHaveLength(4);
     expect(ev).toContain("run.error");
-    expect(ev[ev.length - 1]).toBe("run.finished");
+  });
+
+  test("withPactLock releases its map entry when done", async () => {
+    const { _locksHeld } = await import("../src/worker");
+    await withPactLock("z1", async () => 1);
+    await withPactLock("z2", async () => { throw new Error("x"); }).catch(() => undefined);
+    expect(_locksHeld()).toBe(0);
   });
 
   test("withPactLock serializes work on one pact", async () => {

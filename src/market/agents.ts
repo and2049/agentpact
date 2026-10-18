@@ -29,22 +29,38 @@ export interface AgentRow {
   updated_at: string;
 }
 
+/** Model ids a seller may run on, per provider (quoting and production spend the seller's key). */
+export const MODEL_ALLOWLIST: Record<Exclude<AgentProvider, "platform">, RegExp> = {
+  opencode: /^(glm-|kimi-|qwen|deepseek-|claude-|gpt-|grok-|muse-spark-|minimax-|gemini-)[a-z0-9.\-]+$/i,
+  anthropic: /^claude-[a-z0-9.\-]+$/i,
+  openai: /^(gpt-|o[0-9])[a-z0-9.\-]+$/i,
+};
+export function modelAllowed(provider: AgentProvider, model: string): boolean {
+  if (provider === "platform") return true;
+  return MODEL_ALLOWLIST[provider].test(model) && model.length <= 80;
+}
+
+const AgentFields = {
+  name: z.string().trim().min(2).max(60),
+  description: z.string().trim().max(500),
+  provider: z.enum(AGENT_PROVIDERS),
+  model: z.string().trim().max(80),
+  apiKey: z.string().trim().max(400).optional(),
+  systemPrompt: z.string().trim().max(2000),
+  minUnitPriceCents: z.number().int().min(1).max(100_000),
+  maxUnitPriceCents: z.number().int().min(1).max(100_000),
+  maxItemsPerJob: z.number().int().min(1).max(20),
+  maxQuotesPerDay: z.number().int().min(1).max(200),
+  status: z.enum(["active", "paused"]),
+};
 export const AgentInput = z
-  .object({
-    name: z.string().trim().min(2).max(60),
-    description: z.string().trim().max(500).default(""),
-    provider: z.enum(AGENT_PROVIDERS),
-    model: z.string().trim().max(80).default(""),
-    apiKey: z.string().trim().max(400).optional(),
-    systemPrompt: z.string().trim().max(2000).default(""),
-    minUnitPriceCents: z.number().int().min(1).max(100_000),
-    maxUnitPriceCents: z.number().int().min(1).max(100_000),
-    maxItemsPerJob: z.number().int().min(1).max(20).default(20),
-    maxQuotesPerDay: z.number().int().min(1).max(200).default(20),
-    status: z.enum(["active", "paused"]).default("active"),
-  })
+  .object({ ...AgentFields, description: AgentFields.description.default(""), model: AgentFields.model.default(""), systemPrompt: AgentFields.systemPrompt.default(""), maxItemsPerJob: AgentFields.maxItemsPerJob.default(20), maxQuotesPerDay: AgentFields.maxQuotesPerDay.default(20), status: AgentFields.status.default("active") })
   .refine((a) => a.minUnitPriceCents <= a.maxUnitPriceCents, { message: "minUnitPriceCents must be <= maxUnitPriceCents" })
-  .refine((a) => a.provider === "platform" || a.model.length > 0, { message: "model is required for a keyed provider" });
+  .refine((a) => a.provider === "platform" || a.model.length > 0, { message: "model is required for a keyed provider" })
+  .refine((a) => modelAllowed(a.provider, a.model), { message: "model is not on the allowlist for this provider" });
+/** PATCH body: every field optional, no defaults, no object-level refinements (those run on the merged agent). */
+export const AgentPatch = z.object(Object.fromEntries(Object.entries(AgentFields).map(([k, v]) => [k, v.optional()])) as { [K in keyof typeof AgentFields]: z.ZodOptional<(typeof AgentFields)[K]> });
+export type AgentPatch = z.infer<typeof AgentPatch>;
 export type AgentInput = z.infer<typeof AgentInput>;
 
 export class AgentError extends Error {
@@ -90,7 +106,7 @@ function ownerIsNotPlatform(deps: AgentDeps, ownerId: string): boolean {
   return u?.provider !== "dev";
 }
 
-export async function updateAgent(deps: AgentDeps, ownerId: string, id: string, patch: Partial<AgentInput>): Promise<AgentRow> {
+export async function updateAgent(deps: AgentDeps, ownerId: string, id: string, patch: AgentPatch): Promise<AgentRow> {
   const { db } = deps;
   const cur = getAgent(db, id);
   if (!cur) throw new AgentError("not_found", "agent not found");
@@ -182,12 +198,19 @@ export function publicAgent(db: Db, a: AgentRow, viewerId?: string | null) {
 }
 
 /** The LLM configuration an agent runs on. Decrypts the seller key only here. */
-export async function llmConfigForAgent(deps: AgentDeps, a: AgentRow): Promise<LlmConfig> {
-  if (a.provider === "platform") return loadLlmConfig(deps.env);
+/**
+ * The LLM configuration an agent runs on. Decrypts the seller key only here. `frozen` (provider,
+ * model) comes from the pact snapshot so a later edit to the agent cannot change what was purchased;
+ * the credential is always the current one (custody can rotate it).
+ */
+export async function llmConfigForAgent(deps: AgentDeps, a: AgentRow, frozen?: { provider?: string; model?: string }): Promise<LlmConfig> {
+  const provider = (frozen?.provider ?? a.provider) as AgentProvider;
+  const model = frozen?.model ?? a.model;
+  if (provider === "platform") return loadLlmConfig(deps.env);
   if (!a.api_key_enc) throw new AgentError("invalid", "agent has no API key");
+  if (!modelAllowed(provider, model)) throw new AgentError("invalid", "model is not on the allowlist");
   const apiKey = await open(a.api_key_enc, secretOrThrow(deps));
-  const provider: ProviderName = a.provider;
-  return { provider, model: a.model, fastModel: a.model, apiKey };
+  return { provider: provider as ProviderName, model, fastModel: model, apiKey };
 }
 
 export function quotesTodayFor(db: Db, agentId: string): number {

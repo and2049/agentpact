@@ -29,6 +29,7 @@ describe("checkout hold path", () => {
     expect(pact!.status).toBe("AGREED");
     expect(pact!.order_id).toMatch(/^O/);
     expect(pact!.checkout_deadline).toBeTruthy();
+    expect(pact!.authorized_cents).toBeNull(); // approval is not a hold
     expect(getMandate(db, m.id)!.reserved_cents).toBe(300);
     // idempotent
     const r2 = await beginCheckout(deps, p.id);
@@ -79,7 +80,7 @@ describe("checkout hold path", () => {
     const orderId = b.ok ? b.pact.order_id! : "";
     await Bun.sleep(5);
     const expired = await expireCheckouts(deps);
-    expect(expired).toEqual([p.id]);
+    expect(expired.expired).toEqual([p.id]);
     expect(getMandate(db, m.id)!.reserved_cents).toBe(0);
     pp.approveOrder(orderId);
     const late = await completeCheckout(deps, p.id, orderId);
@@ -97,12 +98,48 @@ describe("checkout hold path", () => {
     expect(!r1.ok && r1.code).toBe("unknown");
     expect(getMandate(db, m.id)!.reserved_cents).toBe(300);
     await Bun.sleep(5);
-    // Sweeper reconciles from the order and finds the authorization instead of expiring.
-    const expired = await expireCheckouts(deps);
-    expect(expired).toEqual([]);
-    const pact = (await completeCheckout(deps, p.id, orderId));
+    // Sweeper reconciles from the order, finds the authorization and promotes the pact instead of expiring it.
+    const swept = await expireCheckouts(deps);
+    expect(swept.expired).toEqual([]);
+    expect(swept.held).toEqual([p.id]);
+    expect(getMandate(db, m.id)!.reserved_cents).toBe(300);
+    const pact = (await completeCheckout(deps, p.id, orderId)); // idempotent on HELD
     expect(pact.ok && pact.pact.status).toBe("HELD");
     expect(pp.auths.size).toBe(1);
+  });
+
+  test("sweeper: an authorize op still in flight keeps the reservation; a recorded CREATED authorization is promoted to HELD", async () => {
+    const { db, deps, p, m, pp } = setup();
+    const b = await beginCheckout(deps, p.id, 1);
+    const orderId = b.ok ? b.pact.order_id! : "";
+    await Bun.sleep(5);
+    // Simulate the approve route mid-call: the op row exists and is pending.
+    db.run("INSERT INTO payment_ops (op_id, pact_id, kind, request_id, status, attempts, created_at, updated_at) VALUES (?, ?, 'authorize_order', 'r1', 'pending', 1, '2026', '2026')", [`${p.id}:authorize`, p.id]);
+    let r = await expireCheckouts(deps);
+    expect(r).toEqual({ expired: [], held: [] });
+    expect(getMandate(db, m.id)!.reserved_cents).toBe(300);
+    // The authorization got recorded (e.g. by a webhook) but the pact never transitioned.
+    pp.approveOrder(orderId);
+    const order = await pp.authorizeOrder({ requestId: "r1", orderId });
+    db.run("UPDATE payment_ops SET status = 'succeeded' WHERE op_id = ?", [`${p.id}:authorize`]);
+    const { recordAuthorization } = await import("../src/payments/resources");
+    recordAuthorization(db, p.id, orderId, order.purchase_units[0]!.payments!.authorizations![0]!);
+    r = await expireCheckouts(deps);
+    expect(r.held).toEqual([p.id]);
+    const held = (await import("../src/pact/machine")).getPact(db, p.id)!;
+    expect(held.status).toBe("HELD");
+    expect(held.authorized_cents).toBe(300);
+  });
+
+  test("sweeper runs each pact under the caller's lock", async () => {
+    const { db, deps, p } = setup();
+    await beginCheckout(deps, p.id, 1);
+    await Bun.sleep(5);
+    const seen: string[] = [];
+    const r = await expireCheckouts(deps, { lock: async (id, fn) => { seen.push(id); return fn(); } });
+    expect(seen).toEqual([p.id]);
+    expect(r.expired).toEqual([p.id]);
+    expect(db.query<{ status: string }, [string]>("SELECT status FROM pacts WHERE id = ?").get(p.id)!.status).toBe("CHECKOUT_EXPIRED");
   });
 
   test("a checkout-held pact settles through the existing flow", async () => {

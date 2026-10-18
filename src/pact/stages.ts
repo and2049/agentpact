@@ -15,6 +15,7 @@ import { appendEvent, now } from "../db";
 import { injectFault } from "../faults";
 import { getMandate, type Mandate } from "../mandate";
 import { confirmCapture, confirmPayout, holdPact, payoutPact, settlePact, type FlowDeps } from "../payments/flow";
+import { captureForPact } from "../payments/resources";
 import type { Rubric } from "../verifier";
 import { verify } from "../verifier";
 import { getPact, jobOf, pactHash, transition } from "./machine";
@@ -139,7 +140,10 @@ export function verdictsOf(db: Db, pactId: string): ItemVerdict[] {
 export async function settleStage(deps: StageDeps, pactId: string): Promise<PactRow> {
   const db = deps.flow.db;
   const before = getPact(db, pactId)!;
-  const p = before.status === "VERIFIED" ? await settlePact(deps.flow, pactId, verdictsOf(db, pactId)) : await confirmCapture(deps.flow, pactId);
+  // Resume settlePact (same persisted decision, same op id) whenever the mutation itself is not
+  // known to have happened: first pass, a void not yet confirmed, or a capture with no resource row.
+  const mutationPending = before.status === "VERIFIED" || before.settlement_kind === "void" || !captureForPact(db, pactId);
+  const p = mutationPending ? await settlePact(deps.flow, pactId, verdictsOf(db, pactId)) : await confirmCapture(deps.flow, pactId);
   if (p?.status === "SETTLED") {
     const text = p.settlement_kind === "void" ? "Voided the authorization; the buyer pays nothing." : p.settlement_kind === "full" ? `Captured ${p.charge_cents}¢ in full.` : `Captured ${p.charge_cents}¢ for ${p.accepted_count} accepted items; the remaining authorization is released.`;
     say(db, pactId, "platform", text);
@@ -209,6 +213,34 @@ export async function advance(deps: StageDeps, pactId: string): Promise<Next> {
     default:
       return { done: true };
   }
+}
+
+/**
+ * The seller agent could not deliver (work or verification kept failing). Treat it as a
+ * zero-item delivery so the normal settlement path voids the hold and releases the reservation.
+ * Payment-stage failures are never abandoned here; they stay recoverable (idempotent ops).
+ */
+export function abandonWork(deps: StageDeps, pactId: string, reason: string): PactRow | null {
+  const db = deps.flow.db;
+  let pact = getPact(db, pactId);
+  if (!pact) return null;
+  if (pact.status === "HELD") {
+    db.run("INSERT OR REPLACE INTO artifacts (pact_id, body_json, submitted_at) VALUES (?, '[]', ?)", [pactId, now()]);
+    say(db, pactId, "platform", `The seller agent failed to deliver (${reason}). Treating this as no delivery.`);
+    pact = transition(db, pactId, "DELIVERED", {}, { itemsDelivered: 0, abandoned: true, reason });
+  }
+  if (pact.status === "DELIVERED") {
+    const job = jobOf(pact);
+    db.run("DELETE FROM item_verdicts WHERE pact_id = ?", [pactId]);
+    for (const s of job.skus) {
+      const v: ItemVerdict = { sku: s.sku, verdict: "rejected", reason: `not delivered: ${reason}`.slice(0, 200), score: null, evidence: [] };
+      db.run("INSERT INTO item_verdicts (pact_id, sku, verdict, reason, score, evidence_json) VALUES (?, ?, ?, ?, ?, ?)", [pactId, v.sku, v.verdict, v.reason, v.score, "[]"]);
+      appendEvent(db, pactId, "verifier.item", v);
+    }
+    say(db, pactId, "verifier", `0 of ${job.skus.length} items accepted.`);
+    pact = transition(db, pactId, "VERIFIED", { accepted_count: 0 }, { accepted: 0, rejected: job.skus.length, abandoned: true });
+  }
+  return pact;
 }
 
 /** Last-resort: a terminal payout confirmation for pacts whose payout item stayed pending. */

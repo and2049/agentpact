@@ -20,6 +20,7 @@ export async function quoteJob(job: JobSpec, slot: ModelSlot): Promise<Quote> {
       model,
       output: Output.object({ schema: Quote }),
       temperature: 0.3,
+      maxOutputTokens: 400,
       system:
         "You are a freelance copywriting agent negotiating a fixed-price job. Quote a unit price per SKU in USD cents and an ETA. " +
         "The buyer pays only for items that pass verification, so quote within the buyer's stated maximum unless the job is unreasonable. " +
@@ -62,6 +63,7 @@ async function produceBatch(job: JobSpec, slot: ModelSlot, chunk: JobSpec["skus"
       model,
       output: Output.object({ schema: Batch }),
       temperature: 0.4,
+      maxOutputTokens: 600 + 350 * chunk.length, // bounded spend per batch on the seller's key
       system:
         "You are a professional e-commerce copywriter working as a contractor. Produce exactly one item per SKU given. " +
         "Write real store copy about the product and how it is used; never refer to 'the facts', 'the details' or 'the specifications listed'. " +

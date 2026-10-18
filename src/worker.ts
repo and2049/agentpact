@@ -7,7 +7,8 @@
  */
 import { appendEvent, now, type Db } from "./db";
 import { expireCheckouts } from "./payments/checkout";
-import { advance, TERMINAL, type StageDeps } from "./pact/stages";
+import { abandonWork, advance, TERMINAL, type StageDeps } from "./pact/stages";
+import { redactSecrets } from "./redact";
 import type { PactRow } from "./pact/types";
 
 export type TaskKind = "advance" | "quote_job" | "sweep";
@@ -46,17 +47,20 @@ export function listTasks(db: Db, subjectId: string): TaskRow[] {
 
 // ---------- per-pact lock ----------
 const locks = new Map<string, Promise<unknown>>();
-/** Serialize all actions on one pact (worker stage, approve route, webhook). */
+/** Serialize all actions on one pact (worker stage, approve route, webhook, sweeper). */
 export async function withPactLock<T>(pactId: string, fn: () => Promise<T>): Promise<T> {
   const prev = locks.get(pactId) ?? Promise.resolve();
   const run = prev.then(fn, fn);
-  locks.set(pactId, run.catch(() => undefined));
+  const settled = run.catch(() => undefined);
+  locks.set(pactId, settled);
   try {
     return await run;
   } finally {
-    if (locks.get(pactId) === run.catch(() => undefined)) locks.delete(pactId);
+    if (locks.get(pactId) === settled) locks.delete(pactId);
   }
 }
+/** Test hook. */
+export const _locksHeld = () => locks.size;
 
 export interface WorkerDeps extends StageDeps {
   /** Produce quotes for an open job (market). */
@@ -131,13 +135,22 @@ export class Worker {
       if (delay === null) db.run("UPDATE tasks SET status = 'done', updated_at = ? WHERE id = ?", [now(), task.id]);
       else db.run("UPDATE tasks SET status = 'queued', run_after = ?, attempts = 0, updated_at = ? WHERE id = ?", [new Date(Date.now() + delay).toISOString(), now(), task.id]);
     } catch (e) {
-      const msg = String((e as Error).message ?? e).slice(0, 500);
+      const msg = redactSecrets(String((e as Error).message ?? e)).slice(0, 500);
       if (task.attempts >= MAX_ATTEMPTS) {
-        db.run("UPDATE tasks SET status = 'failed', last_error = ?, updated_at = ? WHERE id = ?", [msg, now(), task.id]);
         if (task.kind === "advance") {
-          appendEvent(db, task.subject_id, "run.error", { message: msg, attempts: task.attempts });
-          appendEvent(db, task.subject_id, "run.finished", { status: "error" });
+          const pact = this.db.query<PactRow, [string]>("SELECT * FROM pacts WHERE id = ?").get(task.subject_id);
+          appendEvent(db, task.subject_id, "run.error", { message: msg, attempts: task.attempts, stage: pact?.status ?? null });
+          if (pact && (pact.status === "HELD" || pact.status === "DELIVERED")) {
+            // Seller-side failure: no delivery -> normal settlement voids the hold. Fresh attempts for that.
+            await withPactLock(task.subject_id, async () => abandonWork(this.deps, task.subject_id, msg));
+            db.run("UPDATE tasks SET status = 'queued', attempts = 0, run_after = ?, last_error = ?, updated_at = ? WHERE id = ?", [now(), msg, now(), task.id]);
+            return true;
+          }
+          // Payment-side failure: leave the task failed (visible on /health); recovery re-queues it on restart,
+          // and every payment op replays its own request id. The run is stalled, not finished.
+          appendEvent(db, task.subject_id, "run.stalled", { message: msg, stage: pact?.status ?? null });
         }
+        db.run("UPDATE tasks SET status = 'failed', last_error = ?, updated_at = ? WHERE id = ?", [msg, now(), task.id]);
       } else {
         const backoff = Math.min(60_000, 1000 * 2 ** task.attempts);
         db.run("UPDATE tasks SET status = 'queued', run_after = ?, last_error = ?, updated_at = ? WHERE id = ?", [new Date(Date.now() + backoff).toISOString(), msg, now(), task.id]);
@@ -164,11 +177,12 @@ export class Worker {
         await this.deps.quoteJob?.(task.subject_id);
         return null;
       case "sweep": {
-        const expired = await expireCheckouts(this.deps.flow);
-        for (const id of expired) {
+        const r = await expireCheckouts(this.deps.flow, { lock: withPactLock });
+        for (const id of r.expired) {
           const p = this.db.query<PactRow, [string]>("SELECT * FROM pacts WHERE id = ?").get(id);
           if (p) this.deps.onTerminal?.(p);
         }
+        for (const id of r.held) enqueue(this.db, id, "advance");
         return this.deps.sweepMs ?? 60_000;
       }
     }
