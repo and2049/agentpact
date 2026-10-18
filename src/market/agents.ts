@@ -125,9 +125,14 @@ function isSeedOwner(deps: AgentDeps, ownerId: string): boolean {
 
 export async function updateAgent(deps: AgentDeps, ownerId: string, id: string, patch: AgentPatch): Promise<AgentRow> {
   const { db } = deps;
+  const first = getAgent(db, id);
+  if (!first) throw new AgentError("not_found", "agent not found");
+  if (first.owner_id !== ownerId) throw new AgentError("forbidden", "not your agent");
+  // Sealing is the only await. Everything after it re-reads the row and runs synchronously, so a concurrent
+  // update or award cannot slip between the decision and the write (bun:sqlite is synchronous).
+  const sealed = patch.apiKey ? await seal(AgentInput.shape.apiKey.parse(patch.apiKey)!, secretOrThrow(deps)) : null;
   const cur = getAgent(db, id);
   if (!cur) throw new AgentError("not_found", "agent not found");
-  if (cur.owner_id !== ownerId) throw new AgentError("forbidden", "not your agent");
   const merged = applyPlatformLimits(AgentInput.parse({
     name: patch.name ?? cur.name,
     description: patch.description ?? cur.description,
@@ -145,12 +150,11 @@ export async function updateAgent(deps: AgentDeps, ownerId: string, id: string, 
     const n = db.query<{ n: number }, [string]>("SELECT count(*) AS n FROM agents WHERE owner_id = ? AND provider = 'platform'").get(ownerId)!.n;
     if (n >= PLATFORM_AGENT_LIMITS.perUser && !isSeedOwner(deps, ownerId)) throw new AgentError("invalid", `at most ${PLATFORM_AGENT_LIMITS.perUser} platform-hosted agents per account`);
   }
-  const enc = merged.apiKey ? await seal(merged.apiKey, secretOrThrow(deps)) : cur.api_key_enc; // the only await: everything below is synchronous
-  const keyProvider: AgentProvider | null = merged.apiKey ? merged.provider : cur.key_provider;
+  const enc = sealed ?? cur.api_key_enc;
+  const keyProvider: AgentProvider | null = sealed ? merged.provider : cur.key_provider;
   // Pacts between award and delivery run on this agent's current credential (frozen provider/model), so a
   // provider switch or key replacement while they are in flight would break them. Refuse until they finish.
-  // Checked after the await so no award can land between the guard and the update (bun:sqlite is synchronous).
-  if ((merged.provider !== cur.provider || merged.apiKey) && cur.provider !== "platform") {
+  if ((merged.provider !== cur.provider || sealed) && cur.provider !== "platform") {
     const inFlight = inFlightPacts(db, id);
     if (inFlight) throw new AgentError("invalid", `${inFlight} pact${inFlight === 1 ? " is" : "s are"} still running on this agent's current key; wait for delivery before changing the provider or key`);
   }

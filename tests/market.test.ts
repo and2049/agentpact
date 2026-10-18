@@ -2,9 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { upsertUser } from "../src/auth";
 import { openDb } from "../src/db";
 import { getMandate } from "../src/mandate";
-import { AgentInput, AgentPatch, createAgent, ensureSeedAgent, llmConfigForAgent, modelAllowed, publicAgent, updateAgent, type AgentDeps } from "../src/market/agents";
+import { AgentInput, AgentPatch, createAgent, ensureSeedAgent, getAgent, llmConfigForAgent, modelAllowed, publicAgent, updateAgent, type AgentDeps } from "../src/market/agents";
 import { redactedError, redactSecrets } from "../src/redact";
-import { awardJob, cancelJob, canSeeJobDetails, createJob, deliverableFor, eligibleAgents, getJob, JOB_LIMITS, listQuotes, mandateForBuyer, recordQuote, reopenJobFor, reserveQuoteSlots } from "../src/market/jobs";
+import { awardJob, cancelJob, canSeeJobDetails, createJob, deliverableFor, eligibleAgents, getJob, JOB_LIMITS, jobSpecOf, listQuotes, mandateForBuyer, recordQuote, reopenJobFor, reserveQuoteSlots } from "../src/market/jobs";
 import { getPact } from "../src/pact/machine";
 import { completeCheckout, expireCheckouts } from "../src/payments/checkout";
 import { settlePact } from "../src/payments/flow";
@@ -289,6 +289,24 @@ describe("marketplace", () => {
     delKey(db, other.id, a.id); // lands while awardJob awaits the pact hash; no pact exists yet, so the guard lets it through
     await expect(pending).rejects.toThrow(/usable key/);
     expect(getJob(db, job.id)!.status).toBe("OPEN"); // nothing was committed
+  });
+
+  test("updateAgent decides from the row as it is after sealing, not the one read before", async () => {
+    const { db, other, buyer } = setup();
+    const deps: AgentDeps = { db, env: { AGENT_KEY_SECRET: "test-secret" } };
+    const a = await createAgent(deps, other.id, { name: "Hosted", description: "", provider: "platform", model: "", systemPrompt: "", minUnitPriceCents: 10, maxUnitPriceCents: 100, maxItemsPerJob: 10, maxQuotesPerDay: 10, status: "active" });
+    // Update A starts (platform → anthropic) and parks at the seal await.
+    const pendingA = updateAgent(deps, other.id, a.id, { provider: "anthropic", model: "claude-sonnet-5-5", apiKey: "sk-ant-abcdefghijklmnop" });
+    // Meanwhile the agent becomes an OpenAI agent and a pact is awarded on it (synchronous writes, as the server would do).
+    db.run("UPDATE agents SET provider = 'openai', model = 'gpt-5.5', api_key_enc = 'sealed', key_provider = 'openai' WHERE id = ?", [a.id]);
+    const { createPact: mkPact } = await import("../src/pact/machine");
+    const job = createJob(db, buyer.id, { template: "product_descriptions", title: "Live job", brief: "Write a short, factual product description per SKU.", items: [{ sku: "A", facts: { name: "A" } }], maxUnitPriceCents: 100 });
+    const m = mandateForBuyer(db, buyer.id);
+    const pact = mkPact(db, m.id, jobSpecOf(job, "x@sb"));
+    db.run("UPDATE pacts SET agent_id = ?, status = 'AGREED', kind = 'market' WHERE id = ?", [a.id, pact.id]);
+    // A resumes: the stale platform row must not let it overwrite the OpenAI credential the pact needs.
+    await expect(pendingA).rejects.toThrow(/still running/);
+    expect(getAgent(db, a.id)!.key_provider).toBe("openai");
   });
 
   test("three seeded personas quote the same job; the buyer has a real choice", () => {

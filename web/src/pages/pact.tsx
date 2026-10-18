@@ -159,6 +159,14 @@ export function PactPage() {
           <Notice error={actionError} className="basis-full" />
         </Section>
       )}
+      {error && (
+        <Notice error={error} title="Could not refresh this pact">
+          <span className="flex flex-wrap items-center gap-2">
+            {errorText(error)}
+            <Button size="xs" variant="outline" onClick={() => void refresh()}>Try again</Button>
+          </span>
+        </Notice>
+      )}
       {settled && deliverable && <Deliverable pactId={id} d={deliverable} />}
 
       <div className="grid gap-4 lg:grid-cols-2">
