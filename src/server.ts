@@ -151,7 +151,8 @@ app.onError((err, c) => {
   return c.json({ error: "internal error" }, 500);
 });
 
-app.get("/health", (c) => c.json({ ok: true, env: config.paypalEnv }));
+const STARTED_AT = new Date().toISOString();
+app.get("/health", (c) => c.json({ ok: true, env: config.paypalEnv, startedAt: STARTED_AT }));
 
 /** Browser-safe configuration for the thin client. */
 app.get("/api/config", (c) => c.json({ clientId: config.clientId, env: config.paypalEnv, devLogin: Boolean(env.DEV_LOGIN_PASSCODE), keyCustody: Boolean(env.AGENT_KEY_SECRET), templates: Object.entries(TEMPLATES).map(([id, t]) => ({ id, name: t.name, rubric: t.rubric })) }));
