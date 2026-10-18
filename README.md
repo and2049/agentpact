@@ -17,6 +17,10 @@ Scaffold (Oct 18): payment flow, mandate enforcement, state machines and ops log
 
 The PayPal Agent Toolkit is deliberately not on the payment path: its `create_order` cannot set `intent` or `payment_source`, which this design needs.
 
+## LLM providers
+
+The agents and verifier run on the Vercel AI SDK behind one env switch (`LLM_PROVIDER`): OpenCode Go, Anthropic, OpenAI, or any OpenAI-compatible endpoint. See `.env.example`. `bun scripts/llm-smoke.ts` checks the configured provider for text and structured output.
+
 ## Run
 
 ```
