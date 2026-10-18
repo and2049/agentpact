@@ -7,7 +7,7 @@ import { realAgents } from "./agents";
 import { produceArtifact, quoteJob as llmQuote } from "./agents/seller";
 import { cookieHeader, createSession, deleteSession, devLogin, parseCookies, SESSION_COOKIE, SESSION_TTL_MS, upsertUser, userForSession, userFromPayPal, type PayPalUserInfo, type User } from "./auth";
 import { loadConfig } from "./config";
-import { appendEvent, listEvents, openDb } from "./db";
+import { appendEvent, listEvents, now, openDb } from "./db";
 import type { Scenario } from "./faults";
 import { sampleJob } from "./jobs/sample";
 import { loadLlmConfig, models } from "./llm";
@@ -420,7 +420,10 @@ app.post("/api/demo/runs", async (c) => {
   const m = demoMandate();
   const job = sampleJob(config.sellerEmail);
   const pact = preparePact(db, { mandateId: m.id, job, scenario: b.scenario as Scenario, buyerId: demoBuyer.id, sellerId: demoSeller.id });
-  db.run("UPDATE pacts SET agent_id = ? WHERE id = ?", [seedAgent.id, pact.id]);
+  // A matching job row so demo runs appear under the demo buyer's jobs and the pact page can link to them.
+  const row = createJob(db, demoBuyer.id, { template: "product_descriptions", title: job.title, brief: job.brief, items: job.skus, maxUnitPriceCents: job.maxUnitPriceCents, minWords: job.rubric.minWords, maxWords: job.rubric.maxWords });
+  db.run("UPDATE jobs SET status = 'AWARDED', pact_id = ?, updated_at = ? WHERE id = ?", [pact.id, now(), row.id]);
+  db.run("UPDATE pacts SET agent_id = ?, job_id = ? WHERE id = ?", [seedAgent.id, row.id, pact.id]);
   enqueue(db, pact.id, "advance");
   return c.json({ pactId: pact.id, scenario: b.scenario }, 202);
 });
