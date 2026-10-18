@@ -69,6 +69,13 @@ export interface PayPalApi {
     referenceId: string;
     card: CardSource;
   }): Promise<Order>;
+  /** Order that needs buyer approval (Checkout). No payment_source: the JS SDK collects it. */
+  createApprovalOrder(args: { requestId: string; amountCents: number; customId: string; referenceId: string; brandName?: string }): Promise<Order>;
+  getOrder(id: string): Promise<Order>;
+  /** After buyer approval: turn an AUTHORIZE-intent order into an authorization. */
+  authorizeOrder(args: { requestId: string; orderId: string }): Promise<Order>;
+  /** Browser-safe client token for the JS SDK (15 min TTL). */
+  clientToken(domains: string[]): Promise<string>;
   getAuthorization(id: string): Promise<Authorization>;
   captureAuthorization(args: { requestId: string; authorizationId: string; amountCents: number; final: boolean }): Promise<Capture>;
   voidAuthorization(args: { requestId: string; authorizationId: string }): Promise<Authorization>;
@@ -187,6 +194,43 @@ export class PayPalClient implements PayPalApi {
       },
       args.requestId,
     );
+  }
+
+  createApprovalOrder(args: { requestId: string; amountCents: number; customId: string; referenceId: string; brandName?: string }): Promise<Order> {
+    return this.request<Order>(
+      "POST",
+      "/v2/checkout/orders",
+      {
+        intent: "AUTHORIZE",
+        purchase_units: [
+          { reference_id: args.referenceId, custom_id: args.customId, amount: { currency_code: "USD", value: centsToAmount(args.amountCents) } },
+        ],
+        payment_source: { paypal: { experience_context: { brand_name: args.brandName ?? "AgentPact", user_action: "CONTINUE", shipping_preference: "NO_SHIPPING" } } },
+      },
+      args.requestId,
+    );
+  }
+
+  getOrder(id: string): Promise<Order> {
+    return this.request<Order>("GET", `/v2/checkout/orders/${id}`);
+  }
+
+  authorizeOrder(args: { requestId: string; orderId: string }): Promise<Order> {
+    return this.request<Order>("POST", `/v2/checkout/orders/${args.orderId}/authorize`, {}, args.requestId);
+  }
+
+  async clientToken(domains: string[]): Promise<string> {
+    const body = new URLSearchParams({ grant_type: "client_credentials", response_type: "client_token" });
+    body.append("domains[]", domains.join(","));
+    const res = await this.fetchImpl(`${this.opts.base}/v1/oauth2/token`, {
+      method: "POST",
+      headers: { Authorization: "Basic " + btoa(`${this.opts.clientId}:${this.opts.clientSecret}`), "Content-Type": "application/x-www-form-urlencoded" },
+      body: body.toString(),
+      signal: AbortSignal.timeout(this.timeoutMs),
+    });
+    const json = (await res.json()) as { access_token?: string; error_description?: string };
+    if (!res.ok || !json.access_token) throw new PayPalHttpError(res.status, json, `client token: ${json.error_description ?? res.status}`);
+    return json.access_token;
   }
 
   getAuthorization(id: string): Promise<Authorization> {

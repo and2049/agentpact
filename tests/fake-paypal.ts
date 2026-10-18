@@ -7,6 +7,7 @@ type Fault = { kind: "http"; status: number; body?: unknown } | { kind: "timeout
 
 export class FakePayPal implements PayPalApi {
   auths = new Map<string, Authorization & { orderId: string }>();
+  orders = new Map<string, Order>();
   captures = new Map<string, Capture & { authId: string }>();
   payouts = new Map<string, PayoutBatch>();
   byRequestId = new Map<string, unknown>();
@@ -56,6 +57,47 @@ export class FakePayPal implements PayPalApi {
         purchase_units: [{ reference_id: args.referenceId, custom_id: args.customId, amount: auth.amount, payments: { authorizations: [auth] } }],
       };
     });
+  }
+
+  createApprovalOrder(args: { requestId: string; amountCents: number; customId: string; referenceId: string }): Promise<Order> {
+    return this.guarded("createApprovalOrder", args.requestId, () => {
+      const orderId = this.id("O");
+      const order: Order = { id: orderId, status: "CREATED", intent: "AUTHORIZE", purchase_units: [{ reference_id: args.referenceId, custom_id: args.customId, amount: { currency_code: "USD", value: centsToAmount(args.amountCents) } }] };
+      this.orders.set(orderId, order);
+      return order;
+    });
+  }
+
+  getOrder(id: string): Promise<Order> {
+    return this.guarded("getOrder", undefined, () => {
+      const o = this.orders.get(id);
+      if (!o) throw new PayPalHttpError(404, { name: "RESOURCE_NOT_FOUND" });
+      return o;
+    });
+  }
+
+  /** Test helper: simulate buyer approval in the PayPal popup. */
+  approveOrder(id: string) {
+    const o = this.orders.get(id);
+    if (o) o.status = "APPROVED";
+  }
+
+  authorizeOrder(args: { requestId: string; orderId: string }): Promise<Order> {
+    return this.guarded("authorizeOrder", args.requestId, () => {
+      const o = this.orders.get(args.orderId);
+      if (!o) throw new PayPalHttpError(404, { name: "RESOURCE_NOT_FOUND" });
+      if (o.status !== "APPROVED") throw new PayPalHttpError(422, { name: "UNPROCESSABLE_ENTITY", details: [{ issue: "ORDER_NOT_APPROVED" }] });
+      const pu = o.purchase_units[0]!;
+      const auth: Authorization & { orderId: string } = { id: this.id("A"), status: "CREATED", amount: pu.amount, custom_id: pu.custom_id, expiration_time: new Date(Date.now() + 29 * 864e5).toISOString(), orderId: o.id };
+      this.auths.set(auth.id, auth);
+      o.status = "COMPLETED";
+      pu.payments = { authorizations: [auth] };
+      return o;
+    });
+  }
+
+  async clientToken(): Promise<string> {
+    return "fake-client-token";
   }
 
   getAuthorization(id: string): Promise<Authorization> {

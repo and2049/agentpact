@@ -129,6 +129,74 @@ app.post("/api/paypal/webhook", async (c) => {
   return c.json({ ok: true, result });
 });
 
+// ---------- Spike (a): Checkout approval -> server authorize ----------
+app.get("/api/paypal/client-config", (c) => c.json({ clientId: config.clientId, env: config.paypalEnv }));
+
+app.post("/spike/orders", async (c) => {
+  try {
+    const order = await paypal.createApprovalOrder({ requestId: crypto.randomUUID(), amountCents: 1234, customId: "spike-checkout", referenceId: "spike" });
+    appendSpike("order.created", { orderId: order.id, status: order.status });
+    return c.json({ orderId: order.id, status: order.status });
+  } catch (e) {
+    return c.json({ error: (e as Error).message, body: (e as { body?: unknown }).body ?? null }, 500);
+  }
+});
+
+app.post("/spike/authorize", async (c) => {
+  const { orderId } = (await c.req.json().catch(() => ({}))) as { orderId?: string };
+  if (!orderId) return c.json({ error: "orderId required" }, 400);
+  try {
+    const before = await paypal.getOrder(orderId);
+    const order = await paypal.authorizeOrder({ requestId: crypto.randomUUID(), orderId });
+    const auth = order.purchase_units[0]?.payments?.authorizations?.[0] ?? null;
+    appendSpike("order.authorized", { orderId, statusBefore: before.status, statusAfter: order.status, authorization: auth });
+    return c.json({ pass: auth?.status === "CREATED", orderStatusBefore: before.status, orderStatusAfter: order.status, authorization: auth });
+  } catch (e) {
+    return c.json({ pass: false, error: (e as Error).message, body: (e as { body?: unknown }).body ?? null }, 500);
+  }
+});
+
+// ---------- Spike (b): Log in with PayPal ----------
+const LIPP_SCOPES = "openid profile email";
+app.get("/auth/paypal/start", (c) => {
+  const origin = new URL(c.req.url).origin;
+  const state = crypto.randomUUID();
+  const u = new URL("https://www.sandbox.paypal.com/connect");
+  u.searchParams.set("flowEntry", "static");
+  u.searchParams.set("client_id", config.clientId);
+  u.searchParams.set("response_type", "code");
+  u.searchParams.set("scope", LIPP_SCOPES);
+  u.searchParams.set("redirect_uri", `${origin}/auth/paypal/callback`);
+  u.searchParams.set("state", state);
+  c.header("Set-Cookie", `lipp_state=${state}; Path=/; HttpOnly; SameSite=Lax; Max-Age=600${origin.startsWith("https") ? "; Secure" : ""}`);
+  return c.redirect(u.toString());
+});
+
+app.get("/auth/paypal/callback", async (c) => {
+  const code = c.req.query("code");
+  const state = c.req.query("state");
+  const cookie = (c.req.header("cookie") ?? "").match(/(?:^|;\s*)lipp_state=([^;]+)/)?.[1];
+  if (!code) return c.json({ pass: false, error: "no code", query: c.req.query() }, 400);
+  if (!state || state !== cookie) return c.json({ pass: false, error: "state mismatch", state, cookie: Boolean(cookie) }, 400);
+  const tokenRes = await fetch(`${config.paypalBase}/v1/oauth2/token`, {
+    method: "POST",
+    headers: { Authorization: "Basic " + btoa(`${config.clientId}:${config.clientSecret}`), "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ grant_type: "authorization_code", code }).toString(),
+  });
+  const token = (await tokenRes.json()) as { access_token?: string; scope?: string; error_description?: string };
+  if (!token.access_token) return c.json({ pass: false, step: "token", status: tokenRes.status, error: token.error_description ?? token }, 502);
+  const infoRes = await fetch(`${config.paypalBase}/v1/identity/oauth2/userinfo?schema=paypalv1.1`, { headers: { Authorization: `Bearer ${token.access_token}` } });
+  const info = (await infoRes.json()) as Record<string, unknown>;
+  appendSpike("lipp.userinfo", { status: infoRes.status, scope: token.scope, keys: Object.keys(info) });
+  const emails = (info.emails as Array<{ value: string; primary?: boolean }> | undefined) ?? [];
+  return c.json({ pass: Boolean(info.user_id) && emails.length > 0, scope: token.scope, userinfo: info });
+});
+
+function appendSpike(type: string, payload: unknown) {
+  db.run("INSERT INTO events (pact_id, type, payload_json, created_at) VALUES ('spike', ?, ?, ?)", [type, JSON.stringify(payload), new Date().toISOString()]);
+}
+app.get("/spike/log", (c) => c.json(listEvents(db, "spike")));
+
 app.use("/*", serveStatic({ root: "./public" }));
 
 export default { port: config.port, fetch: app.fetch, idleTimeout: 120 };
