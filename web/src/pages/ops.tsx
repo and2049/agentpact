@@ -106,6 +106,7 @@ export function OpsPage() {
       let quoting = true
       while (Date.now() < deadline && alive.current) {
         await sleep(3000)
+        if (!alive.current) return
         const j = await api<JobDetail>(`/api/jobs/${job.id}`)
         quotes = (j.quotes ?? []).filter((q) => q.status === "open")
         quoting = Boolean(j.quoting)

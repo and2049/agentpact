@@ -232,27 +232,31 @@ export async function awardJob(deps: { db: Db; flow: FlowDeps }, args: { jobId: 
   const offer: Offer = { unitPriceCents: quote.unit_price_cents, etaMinutes: quote.eta_minutes, note: quote.message };
   const hash = await pactHash(spec, offer);
   const mandate = mandateForBuyer(db, args.buyerId);
-  const frozen = {
-    quoteId: quote.id,
-    offer,
-    agent: { id: agent.id, name: agent.name, provider: agent.provider, model: agent.model, system_prompt: agent.system_prompt },
-    payout_recipient: seller.email,
-    templateVersion: 1,
-    frozenAt: now(),
-  };
 
   const tx = db.transaction(() => {
+    // Re-read the agent inside the transaction: the row read before the hash await may be stale
+    // (a provider switch or key deletion could have landed meanwhile), and the snapshot must be what runs.
+    const fresh = getAgent(db, quote.agent_id);
+    if (!agentUsable(fresh)) throw new JobError("state", "agent is paused or has no usable key for its provider");
+    const frozen = {
+      quoteId: quote.id,
+      offer,
+      agent: { id: fresh.id, name: fresh.name, provider: fresh.provider, model: fresh.model, system_prompt: fresh.system_prompt },
+      payout_recipient: seller.email,
+      templateVersion: 1,
+      frozenAt: now(),
+    };
     const awarded = db.run("UPDATE jobs SET status = 'AWARDED', updated_at = ? WHERE id = ? AND status = 'OPEN'", [now(), job.id]).changes;
     if (awarded !== 1) throw new JobError("state", "job was already awarded");
     const pact = createPact(db, mandate.id, spec);
     db.run(
       "UPDATE pacts SET kind = 'market', job_id = ?, quote_id = ?, agent_id = ?, buyer_id = ?, seller_id = ?, payout_recipient = ?, frozen_json = ? WHERE id = ?",
-      [job.id, quote.id, agent.id, job.buyer_id, seller.id, seller.email, JSON.stringify(frozen), pact.id],
+      [job.id, quote.id, fresh.id, job.buyer_id, seller.id, seller.email, JSON.stringify(frozen), pact.id],
     );
     db.run("UPDATE jobs SET pact_id = ? WHERE id = ?", [pact.id, job.id]);
     db.run("UPDATE quotes SET status = CASE WHEN id = ? THEN 'awarded' ELSE 'lost' END WHERE job_id = ? AND status IN ('open', 'awarded', 'lost')", [quote.id, job.id]); // pending slots stay pending
     appendEvent(db, pact.id, "run.started", { kind: "market", jobId: job.id, itemCount: spec.skus.length, maxUnitPriceCents: spec.maxUnitPriceCents });
-    say(db, pact.id, "buyer", `Awarded "${job.title}" to ${agent.name} at ${offer.unitPriceCents}¢ per item (${spec.skus.length} items). Payment is per accepted item after verification.`);
+    say(db, pact.id, "buyer", `Awarded "${job.title}" to ${fresh.name} at ${offer.unitPriceCents}¢ per item (${spec.skus.length} items). Payment is per accepted item after verification.`);
     say(db, pact.id, "seller", offer.note, { quote: offer });
     transition(db, pact.id, "OFFERED", { offer_json: JSON.stringify(offer), unit_price_cents: offer.unitPriceCents }, offer);
     return transition(db, pact.id, "AGREED", { pact_hash: hash }, { unitPriceCents: offer.unitPriceCents, totalCents: offer.unitPriceCents * spec.skus.length, hash, frozen: true });

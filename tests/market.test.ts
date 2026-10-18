@@ -276,6 +276,21 @@ describe("marketplace", () => {
     expect(b.key_provider).toBe("openai");
   });
 
+  test("an award re-reads the agent inside its transaction: a key deleted during the hash await cannot be frozen", async () => {
+    const { db, other, buyer } = setup();
+    const deps: AgentDeps = { db, env: { AGENT_KEY_SECRET: "test-secret" } };
+    const a = await createAgent(deps, other.id, { name: "Racy", description: "", provider: "openai", model: "gpt-5.5", apiKey: "sk-openai-1234567890", systemPrompt: "", minUnitPriceCents: 10, maxUnitPriceCents: 100, maxItemsPerJob: 20, maxQuotesPerDay: 20, status: "active" });
+    const job = createJob(db, buyer.id, { template: "product_descriptions", title: "Racy job", brief: "Write a short, factual product description per SKU.", items: [{ sku: "A", facts: { name: "A" } }], maxUnitPriceCents: 100 });
+    db.run("INSERT INTO quotes (id, job_id, agent_id, seller_id, unit_price_cents, eta_minutes, message, status, created_at) VALUES ('racy-q', ?, ?, ?, 50, 5, 'ok', 'open', '2026-01-01')", [job.id, a.id, other.id]);
+    const { awardJob: award } = await import("../src/market/jobs");
+    const { FakePayPal: Fake } = await import("./fake-paypal");
+    const { deleteAgentKey: delKey } = await import("../src/market/agents");
+    const pending = award({ db, flow: { db, paypal: new Fake(), buyerCard: TEST_CARD, sellerEmail: "x@sb" } }, { jobId: job.id, quoteId: "racy-q", buyerId: buyer.id });
+    delKey(db, other.id, a.id); // lands while awardJob awaits the pact hash; no pact exists yet, so the guard lets it through
+    await expect(pending).rejects.toThrow(/usable key/);
+    expect(getJob(db, job.id)!.status).toBe("OPEN"); // nothing was committed
+  });
+
   test("three seeded personas quote the same job; the buyer has a real choice", () => {
     const { db, seller, job } = setup();
     const agents = eligibleAgents(db, job);

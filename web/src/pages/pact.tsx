@@ -67,11 +67,13 @@ export function PactPage() {
   const [unitPrice, setUnitPrice] = React.useState(0)
   const [deliverable, setDeliverable] = React.useState<DeliverableShape | null>(null)
   const [retrying, setRetrying] = React.useState(false)
+  const [actionError, setActionError] = React.useState<unknown>(null)
 
   const refresh = React.useCallback(async () => {
     try {
       const r = await api<PactDetail>(`/api/pacts/${id}`)
       setX(r)
+      setError(null)
       setLiveStatus(r.pact.status)
       if (r.pact.unit_price_cents) setUnitPrice(r.pact.unit_price_cents)
       if (r.pact.status === "SETTLED" || r.pact.status === "PAID_OUT") setDeliverable(await api<DeliverableShape>(`/api/pacts/${id}/deliverable`))
@@ -110,7 +112,7 @@ export function PactPage() {
     return () => es.close()
   }, [id, refresh])
 
-  if (error) return <Notice error={error}>{error instanceof ApiError && error.status === 401 ? "Log in to see this pact." : errorText(error)}</Notice>
+  if (error && !x) return <Notice error={error}>{error instanceof ApiError && error.status === 401 ? "Log in to see this pact." : errorText(error)}</Notice>
   if (!x) return <LoadingBlock rows={4} />
 
   const p = x.pact
@@ -124,7 +126,8 @@ export function PactPage() {
 
   const retryCheckout = async () => {
     setRetrying(true)
-    try { await api(`/api/pacts/${id}/checkout`, { method: "POST" }) } catch (e) { setError(e) }
+    setActionError(null)
+    try { await api(`/api/pacts/${id}/checkout`, { method: "POST" }) } catch (e) { setActionError(e) }
     setRetrying(false)
     void refresh()
   }
@@ -153,6 +156,7 @@ export function PactPage() {
         <Section title="PayPal order not created yet" contentClassName="flex-row flex-wrap items-center justify-between">
           <p className="text-sm text-muted-foreground">The award is recorded but order creation did not complete. Retrying reuses the same idempotency key.</p>
           <Button onClick={retryCheckout} disabled={retrying}>Retry checkout</Button>
+          <Notice error={actionError} className="basis-full" />
         </Section>
       )}
       {settled && deliverable && <Deliverable pactId={id} d={deliverable} />}

@@ -75,7 +75,7 @@ export function PostJobPage() {
                 <InputGroupInput id="max" type="number" inputMode="decimal" step="0.01" min="0.01" max="1000" value={maxDollars} onChange={(e) => setMaxDollars(e.target.value)} required />
               </InputGroup>
               <FieldDescription>
-                Agents whose band includes this price will quote. Up to ${((maxCents * items.length) / 100).toFixed(2)} is authorized for {items.length} item{items.length === 1 ? "" : "s"}; only accepted items are charged.
+                Agents whose minimum fits this budget will quote, at or below it. Up to ${((maxCents * items.length) / 100).toFixed(2)} is authorized for {items.length} item{items.length === 1 ? "" : "s"}; only accepted items are charged.
               </FieldDescription>
             </Field>
           </FieldSet>
