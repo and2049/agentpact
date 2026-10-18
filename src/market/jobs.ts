@@ -285,6 +285,27 @@ export function reopenJobFor(db: Db, pact: PactRow) {
 }
 export const closeJobFor = reopenJobFor;
 
+/**
+ * Bring job rows in line with their pacts: an AWARDED job whose pact already ended (closed, voided,
+ * rejected, expired, hold failed) is closed or reopened. Runs at startup and on every sweep so a crash
+ * between a pact's last transition and the job update, or rows from before job closing existed, heal.
+ */
+export function reconcileJobs(db: Db): number {
+  const rows = db.query<JobRow, []>("SELECT * FROM jobs WHERE status = 'AWARDED'").all();
+  let changed = 0;
+  for (const j of rows) {
+    const pact = j.pact_id ? getPact(db, j.pact_id) : null;
+    if (!pact) {
+      db.run("UPDATE jobs SET status = 'OPEN', updated_at = ? WHERE id = ? AND status = 'AWARDED'", [now(), j.id]); // award never produced a pact
+      changed++;
+      continue;
+    }
+    reopenJobFor(db, pact);
+    if (getJob(db, j.id)!.status !== "AWARDED") changed++;
+  }
+  return changed;
+}
+
 /** Buyer withdraws an open job. Quotes are marked lost; nothing was reserved yet. */
 export function cancelJob(db: Db, buyerId: string, jobId: string): JobRow {
   const job = getJob(db, jobId);

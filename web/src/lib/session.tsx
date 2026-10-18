@@ -5,7 +5,10 @@ interface Session {
   me: User | null
   config: Config
   ready: boolean
+  /** Pacts awaiting this buyer's PayPal approval (id + title), refreshed on navigation. */
+  awaiting: Array<{ id: string; title: string }>
   refresh: () => Promise<void>
+  refreshAwaiting: () => Promise<void>
   logout: () => Promise<void>
 }
 
@@ -16,12 +19,27 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   const [me, setMe] = React.useState<User | null>(null)
   const [config, setConfig] = React.useState<Config>(EMPTY)
   const [ready, setReady] = React.useState(false)
+  const [awaiting, setAwaiting] = React.useState<Array<{ id: string; title: string }>>([])
+
+  const meRef = React.useRef<User | null>(null)
+  const refreshAwaiting = React.useCallback(async () => {
+    const user = meRef.current
+    if (!user) return setAwaiting([])
+    try {
+      const pacts = await api<Array<{ id: string; title: string; status: string; kind: string; buyer_id: string | null }>>("/api/pacts")
+      setAwaiting(pacts.filter((p) => p.kind === "market" && p.status === "AGREED" && p.buyer_id === user.id).map((p) => ({ id: p.id, title: p.title })))
+    } catch {
+      setAwaiting([])
+    }
+  }, [])
 
   const refresh = React.useCallback(async () => {
     const r = await fetch("/me")
     const j = r.ok ? ((await r.json()) as { user: User | null }) : { user: null }
+    meRef.current = j.user
     setMe(j.user)
-  }, [])
+    void refreshAwaiting()
+  }, [refreshAwaiting])
 
   React.useEffect(() => {
     void (async () => {
@@ -33,10 +51,12 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
 
   const logout = React.useCallback(async () => {
     await api("/logout", { method: "POST" })
+    meRef.current = null
     setMe(null)
+    setAwaiting([])
   }, [])
 
-  const value = React.useMemo(() => ({ me, config, ready, refresh, logout }), [me, config, ready, refresh, logout])
+  const value = React.useMemo(() => ({ me, config, ready, awaiting, refresh, refreshAwaiting, logout }), [me, config, ready, awaiting, refresh, refreshAwaiting, logout])
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>
 }
 

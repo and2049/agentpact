@@ -309,6 +309,27 @@ describe("marketplace", () => {
     expect(getAgent(db, a.id)!.key_provider).toBe("openai");
   });
 
+  test("reconcileJobs closes or reopens awarded jobs whose pacts already ended", async () => {
+    const { db, other, buyer } = setup();
+    const { reconcileJobs } = await import("../src/market/jobs");
+    const { createPact: mkPact } = await import("../src/pact/machine");
+    const mk = (title: string) => createJob(db, buyer.id, { template: "product_descriptions", title, brief: "Write a short, factual product description per SKU.", items: [{ sku: "A", facts: { name: "A" } }], maxUnitPriceCents: 100 });
+    const m = mandateForBuyer(db, buyer.id);
+    const paid = mk("Paid"), expired = mk("Expired"), running = mk("Running"), orphan = mk("Orphan");
+    for (const [j, status] of [[paid, "PAID_OUT"], [expired, "CHECKOUT_EXPIRED"], [running, "HELD"]] as const) {
+      const p = mkPact(db, m.id, jobSpecOf(j, "x@sb"));
+      db.run("UPDATE pacts SET status = ?, kind = 'market', job_id = ?, seller_id = ? WHERE id = ?", [status, j.id, other.id, p.id]);
+      db.run("UPDATE jobs SET status = 'AWARDED', pact_id = ? WHERE id = ?", [p.id, j.id]);
+    }
+    db.run("UPDATE jobs SET status = 'AWARDED', pact_id = NULL WHERE id = ?", [orphan.id]);
+    expect(reconcileJobs(db)).toBe(3);
+    expect(getJob(db, paid.id)!.status).toBe("CLOSED");
+    expect(getJob(db, expired.id)!.status).toBe("OPEN");
+    expect(getJob(db, running.id)!.status).toBe("AWARDED");
+    expect(getJob(db, orphan.id)!.status).toBe("OPEN");
+    expect(reconcileJobs(db)).toBe(0); // idempotent
+  });
+
   test("three seeded personas quote the same job; the buyer has a real choice", () => {
     const { db, seller, job } = setup();
     const agents = eligibleAgents(db, job);

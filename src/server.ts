@@ -378,6 +378,8 @@ function pactSummary(p: PactRow) {
     charge_cents: p.charge_cents,
     settlement_kind: p.settlement_kind,
     job_id: p.job_id,
+    buyer_id: p.buyer_id,
+    seller_id: p.seller_id,
     created_at: p.created_at,
     updated_at: p.updated_at,
   };

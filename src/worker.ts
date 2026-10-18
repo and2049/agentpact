@@ -5,6 +5,7 @@
  *  - per-pact lock shared with the approve route and the webhook receiver
  *  - startup recovery re-queues running rows and any in-flight pact without a task
  */
+import { reconcileJobs } from "./market/jobs";
 import { appendEvent, now, type Db } from "./db";
 import { expireCheckouts } from "./payments/checkout";
 import { abandonWork, advance, TERMINAL, type StageDeps } from "./pact/stages";
@@ -95,6 +96,8 @@ export class Worker {
       pacts.push(p.id);
     }
     enqueue(db, "*", "sweep");
+    const healed = reconcileJobs(db);
+    if (healed) console.log(`worker: reconciled ${healed} job${healed === 1 ? "" : "s"} with ended pacts`);
     return { requeued, pacts };
   }
 
@@ -177,6 +180,7 @@ export class Worker {
         await this.deps.quoteJob?.(task.subject_id);
         return null;
       case "sweep": {
+        reconcileJobs(this.db);
         await expireCheckouts(this.deps.flow, {
           lock: withPactLock,
           onHeld: (id) => enqueue(this.db, id, "advance"), // scheduled inside the lock, before the sweep moves on

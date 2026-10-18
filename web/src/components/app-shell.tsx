@@ -1,6 +1,6 @@
 import * as React from "react"
 import { cn } from "cn"
-import { Link, NavLink, Outlet, useNavigate } from "react-router-dom"
+import { Link, NavLink, Outlet, useLocation, useNavigate } from "react-router-dom"
 
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
@@ -15,9 +15,15 @@ import { useSession } from "@/lib/session"
 export interface ShellContext { openDevLogin: () => void }
 
 export function AppShell() {
-  const { me, logout } = useSession()
+  const { me, logout, awaiting, refreshAwaiting } = useSession()
   const navigate = useNavigate()
+  const { pathname } = useLocation()
   const [devOpen, setDevOpen] = React.useState(false)
+  // Pacts waiting for this buyer's approval are easy to lose after navigating away; re-check on every route change.
+  React.useEffect(() => {
+    if (me) void refreshAwaiting()
+  }, [me, pathname, refreshAwaiting])
+  const pending = awaiting.filter((a) => pathname !== `/pacts/${a.id}`)
   const nav: Array<{ to: string; label: string; end?: boolean }> = [
     { to: "/jobs", label: "Jobs" },
     { to: "/agents", label: "Agents", end: true },
@@ -28,11 +34,12 @@ export function AppShell() {
   return (
     <div className="flex min-h-svh flex-col">
       <header className="border-b bg-card">
-        <div className="mx-auto flex max-w-7xl items-center gap-4 px-4 py-3 md:px-6">
+        <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3 md:px-6">
           <Link to="/" className="font-heading text-lg font-semibold tracking-tight">
             AgentPact
           </Link>
-          <nav className="ml-auto flex items-center gap-1 text-sm">
+          {/* On phones the nav drops to its own row under the brand and actions. */}
+          <nav className="order-last -mx-1 flex w-full items-center gap-1 overflow-x-auto text-sm sm:order-none sm:mx-0 sm:ml-auto sm:w-auto">
             {nav.map((n) => (
               <NavLink
                 key={n.to}
@@ -46,7 +53,7 @@ export function AppShell() {
               </NavLink>
             ))}
           </nav>
-          <div className="flex items-center gap-2 text-sm">
+          <div className="ml-auto flex items-center gap-2 text-sm sm:ml-0">
             <Button size="sm" render={<Link to="/post" />} nativeButton={false}>
               Post a job
             </Button>
@@ -72,6 +79,17 @@ export function AppShell() {
       </header>
 
       <main className="mx-auto flex w-full max-w-7xl flex-1 flex-col gap-6 px-4 py-6 md:px-6">
+        {pending.length > 0 && (
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-warning/10 px-3 py-2 text-sm">
+            <span>
+              {pending.length === 1 ? "A pact is waiting for your PayPal approval: " : `${pending.length} pacts are waiting for your PayPal approval, including `}
+              <span className="font-medium">{pending[0]!.title}</span>
+            </span>
+            <Button size="sm" variant="outline" render={<Link to={`/pacts/${pending[0]!.id}`} />} nativeButton={false}>
+              Approve now
+            </Button>
+          </div>
+        )}
         <Outlet context={{ openDevLogin: () => setDevOpen(true) } satisfies ShellContext} />
       </main>
 

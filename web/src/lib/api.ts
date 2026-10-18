@@ -19,11 +19,12 @@ export class ApiError extends Error {
   }
 }
 
-export async function api<T = unknown>(path: string, opts: { method?: string; body?: unknown } = {}): Promise<T> {
+export async function api<T = unknown>(path: string, opts: { method?: string; body?: unknown; signal?: AbortSignal } = {}): Promise<T> {
   const r = await fetch(path, {
     method: opts.method ?? "GET",
     headers: { "Content-Type": "application/json" },
     body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
+    signal: opts.signal,
   })
   const j = (await r.json().catch(() => ({}))) as Record<string, unknown>
   if (!r.ok) throw new ApiError(typeof j.error === "string" ? j.error : `HTTP ${r.status}`, r.status, j)
@@ -69,7 +70,7 @@ export interface JobDetail extends JobSummary {
 export interface PactSummary {
   id: string; kind: "demo" | "market"; scenario: "good" | "partial" | "broken" | null; status: PactStatus; title: string
   item_count: number; unit_price_cents: number | null; authorized_cents: number | null; accepted_count: number | null
-  charge_cents: number | null; settlement_kind: "full" | "partial" | "void" | null; job_id: string | null; created_at: string; updated_at: string
+  charge_cents: number | null; settlement_kind: "full" | "partial" | "void" | null; job_id: string | null; buyer_id: string | null; seller_id: string | null; created_at: string; updated_at: string
 }
 export interface Verdict { sku: string; verdict: "accepted" | "rejected"; reason: string; score: number | null; evidence: string[] }
 export interface PactDetail {

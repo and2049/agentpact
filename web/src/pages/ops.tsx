@@ -56,9 +56,14 @@ export function OpsPage() {
   const running = steps.some((s) => s.state === "running")
   // Leaving the page cancels a running script: no award or navigation from an abandoned handler.
   const alive = React.useRef(true)
+  const aborter = React.useRef(new AbortController())
   React.useEffect(() => {
     alive.current = true
-    return () => { alive.current = false }
+    aborter.current = new AbortController()
+    return () => {
+      alive.current = false
+      aborter.current.abort()
+    }
   }, [])
   const seededSeller = me?.provider === "dev" && me.provider_user_id === "seller"
 
@@ -98,7 +103,8 @@ export function OpsPage() {
       { label: "Approve the PayPal hold on the pact page (you)", state: "todo" },
     ])
     try {
-      const job = await api<JobDetail>("/api/jobs", { method: "POST", body: { template: "product_descriptions", ...DEMO_JOB } })
+      const signal = aborter.current.signal
+      const job = await api<JobDetail>("/api/jobs", { method: "POST", body: { template: "product_descriptions", ...DEMO_JOB }, signal })
       setStep(0, { state: "done", detail: job.title })
       setStep(1, { state: "running" })
       let quotes = job.quotes ?? []
@@ -107,7 +113,7 @@ export function OpsPage() {
       while (Date.now() < deadline && alive.current) {
         await sleep(3000)
         if (!alive.current) return
-        const j = await api<JobDetail>(`/api/jobs/${job.id}`)
+        const j = await api<JobDetail>(`/api/jobs/${job.id}`, { signal })
         quotes = (j.quotes ?? []).filter((q) => q.status === "open")
         quoting = Boolean(j.quoting)
         setStep(1, { detail: `${quotes.length} quote${quotes.length === 1 ? "" : "s"} so far` })
@@ -120,7 +126,7 @@ export function OpsPage() {
       const best = [...quotes].sort((a, b) => a.unit_price_cents - b.unit_price_cents || a.eta_minutes - b.eta_minutes)[0]!
       let pactId: string
       try {
-        pactId = (await api<{ pactId: string }>(`/api/jobs/${job.id}/award`, { method: "POST", body: { quoteId: best.id } })).pactId
+        pactId = (await api<{ pactId: string }>(`/api/jobs/${job.id}/award`, { method: "POST", body: { quoteId: best.id }, signal })).pactId
       } catch (e) {
         // The award may be committed while order creation is unknown or failed: the pact page has the retry.
         if (e instanceof ApiError && typeof e.body.pactId === "string") pactId = e.body.pactId
