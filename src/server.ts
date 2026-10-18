@@ -158,8 +158,16 @@ app.post("/spike/authorize", async (c) => {
 
 // ---------- Spike (b): Log in with PayPal ----------
 const LIPP_SCOPES = "openid profile email";
+/** Public origin as seen by the browser: PUBLIC_URL if set, else forwarded headers (Render terminates TLS). */
+function publicOrigin(c: { req: { url: string; header: (k: string) => string | undefined } }): string {
+  if (process.env.PUBLIC_URL) return process.env.PUBLIC_URL.replace(/\/$/, "");
+  const u = new URL(c.req.url);
+  const proto = c.req.header("x-forwarded-proto") ?? u.protocol.replace(":", "");
+  const host = c.req.header("x-forwarded-host") ?? c.req.header("host") ?? u.host;
+  return `${proto}://${host}`;
+}
 app.get("/auth/paypal/start", (c) => {
-  const origin = new URL(c.req.url).origin;
+  const origin = publicOrigin(c);
   const state = crypto.randomUUID();
   const u = new URL("https://www.sandbox.paypal.com/connect");
   u.searchParams.set("flowEntry", "static");
