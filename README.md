@@ -6,7 +6,7 @@ Built for the [PayPal AI Hackathon](https://paypalaihackathon.devpost.com/) (Oct
 
 ## Status
 
-Scaffold (Oct 18): payment flow, mandate enforcement, state machines and ops log are implemented and tested against a fake and against the real sandbox (`bun scripts/slice.ts`). Agents, verifier and UI are next.
+Oct 18: the full pact runs end to end against the PayPal sandbox and a live model (`bun scripts/run.ts good|partial|broken`): quote, server-enforced acceptance, authorization hold, seller work with disclosed fault injection, per-item verification, partial/full capture or void, payout to the seller. 48 unit tests. Web UI and Render deploy are next.
 
 ## PayPal products used
 
@@ -28,7 +28,10 @@ cp .env.example .env     # fill in sandbox credentials, see docs/SETUP.md
 bun install
 bun test
 bun scripts/gate.ts      # day-1 feasibility gate against the sandbox
-bun scripts/slice.ts partial
+bun scripts/slice.ts partial   # payment flow only, no LLM
+bun scripts/llm-smoke.ts       # provider check
+bun scripts/verify-smoke.ts partial   # seller work + verifier, no PayPal
+bun scripts/run.ts partial     # everything
 bun src/server.ts
 ```
 

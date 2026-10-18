@@ -54,10 +54,56 @@ export function loadLlmConfig(env: Record<string, string | undefined> = process.
   return { provider, model, fastModel, apiKey, baseUrl: env.LLM_BASE_URL || undefined };
 }
 
+/**
+ * A model plus an optional fallback that avoids native JSON-schema output.
+ * Some gateways (OpenCode Go for DeepSeek) intermittently reject
+ * `response_format: json_schema`; the fallback uses prompt-guided JSON instead.
+ */
+export interface ModelSlot {
+  model: LanguageModel;
+  fallback: LanguageModel | null;
+}
+
 export interface Models {
-  main: LanguageModel;
-  fast: LanguageModel;
+  main: ModelSlot;
+  fast: ModelSlot;
   describe: string;
+}
+
+function isStructuredOutputRejection(e: unknown): boolean {
+  const msg = String((e as Error)?.message ?? e);
+  const status = (e as { statusCode?: number })?.statusCode;
+  return status === 400 && /response_format|json_schema|structured/i.test(msg);
+}
+
+function isMalformedObject(e: unknown): boolean {
+  const name = String((e as Error)?.name ?? "");
+  return /NoObjectGenerated|TypeValidation|JSONParse/i.test(name);
+}
+
+/**
+ * Run `fn` on the slot's model. On a structured-output rejection by the
+ * gateway, switch to the fallback model. On a malformed object (schema
+ * mismatch, bad JSON) retry once on whichever model was in use.
+ */
+export async function withFallback<T>(slot: ModelSlot, fn: (m: LanguageModel) => Promise<T>): Promise<T> {
+  let model = slot.model;
+  let retried = false;
+  for (;;) {
+    try {
+      return await fn(model);
+    } catch (e) {
+      if (slot.fallback && model !== slot.fallback && isStructuredOutputRejection(e)) {
+        model = slot.fallback;
+        continue;
+      }
+      if (!retried && isMalformedObject(e)) {
+        retried = true;
+        continue;
+      }
+      throw e;
+    }
+  }
 }
 
 const USER_AGENT = "agentpact/0.1";
@@ -68,7 +114,7 @@ const USER_AGENT = "agentpact/0.1";
  */
 export function models(cfg: LlmConfig = loadLlmConfig(), sessionId: string = crypto.randomUUID()): Models {
   const headers = { "x-opencode-session": sessionId, "User-Agent": USER_AGENT };
-  const make = (id: string): LanguageModel => {
+  const make = (id: string, nativeJson = true): LanguageModel => {
     switch (cfg.provider) {
       case "anthropic":
         return createAnthropic({ apiKey: cfg.apiKey, baseURL: cfg.baseUrl })(id);
@@ -82,9 +128,13 @@ export function models(cfg: LlmConfig = loadLlmConfig(), sessionId: string = cry
         const base = cfg.baseUrl ?? OPENCODE_GO;
         if (id.startsWith("claude-")) return createAnthropic({ apiKey: cfg.apiKey, baseURL: `${base}/anthropic/v1`, headers })(id);
         if (/^(gpt-|grok-|muse-spark-)/.test(id)) return createOpenAI({ apiKey: cfg.apiKey, baseURL: `${base}/openai/v1`, headers }).responses(id);
-        return createOpenAICompatible({ name: "opencode-go", apiKey: cfg.apiKey, baseURL: `${base}/openai/v1`, headers, supportsStructuredOutputs: true }).chatModel(id);
+        return createOpenAICompatible({ name: "opencode-go", apiKey: cfg.apiKey, baseURL: `${base}/openai/v1`, headers, supportsStructuredOutputs: nativeJson }).chatModel(id);
       }
     }
   };
-  return { main: make(cfg.model), fast: make(cfg.fastModel), describe: `${cfg.provider}: ${cfg.model} (fast: ${cfg.fastModel})` };
+  const slot = (id: string): ModelSlot => {
+    const usesChatCompletions = cfg.provider === "opencode" && !id.startsWith("claude-") && !/^(gpt-|grok-|muse-spark-)/.test(id);
+    return { model: make(id), fallback: usesChatCompletions ? make(id, false) : null };
+  };
+  return { main: slot(cfg.model), fast: slot(cfg.fastModel), describe: `${cfg.provider}: ${cfg.model} (fast: ${cfg.fastModel})` };
 }
