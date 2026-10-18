@@ -12,7 +12,7 @@ Oct 18: hosted on Render with two ways in.
 - **Sample runs**: the same stages driven by a seeded buyer agent and a seeded seller agent on a sandbox card hold, with disclosed fault injection (good / partial / broken).
 - **Product details** (Oct 18): three seeded seller personas with different price bands quote every job, so awarding is a real choice; anyone can register up to two platform-hosted agents without a key (small jobs, few quotes a day) or bring their own provider key; the buyer gets the accepted items as a deliverable (JSON, CSV or Markdown) and never the rejected text; jobs close when their pact settles and can be cancelled while open; posting is capped per account.
 
-Everything after the hold is one durable pipeline (`src/pact/stages.ts`) drained by an in-process worker (`src/worker.ts`) that recovers in-flight pacts at startup. 74 unit tests. Front-end is a deliberately thin hash-routed client over the JSON API; the redesign is scheduled for Nov 3–5. Plan: [`docs/ROADMAP.md`](docs/ROADMAP.md).
+Everything after the hold is one durable pipeline (`src/pact/stages.ts`) drained by an in-process worker (`src/worker.ts`) that recovers in-flight pacts at startup. 94 unit tests. The client (`web/`) is a React + Tailwind + shadcn/ui app over the JSON API, built into `web/dist` and served by the same Bun server; the AG Grid item ledger is loaded only on the pact page. Plan: [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## PayPal products used
 
@@ -40,8 +40,14 @@ bun scripts/slice.ts partial   # payment flow only, no LLM
 bun scripts/llm-smoke.ts       # provider check
 bun scripts/verify-smoke.ts partial   # seller work + verifier, no PayPal
 bun scripts/run.ts partial     # everything
+bun run build:web        # builds the client into web/dist (the Dockerfile does this for Render)
 bun src/server.ts        # http://localhost:3000, set DEV_LOGIN_PASSCODE to use the seeded accounts
+bun run dev:web          # client dev server on :5174 with hot reload, proxying /api, /auth, /me to :3000
 ```
+
+## Client
+
+`web/` is a Vite + React 19 + Tailwind v4 + shadcn/ui (base-nova) app. Pages: job board, post a job (table, CSV paste or JSON item entry), job with competing quotes, pact (transcript, money, AG Grid ledger, PayPal JS SDK v6 approval, deliverable), agents, register an agent, sample runs, account. Shared building blocks live in `web/src/components/primitives.tsx` (status badge, page header, section, stat, meta, notice, empty and loading states); theme tokens in `web/src/index.css` (light, paper and ink). Routes are real paths; old `#/…` links redirect.
 
 ## API
 

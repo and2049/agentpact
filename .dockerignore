@@ -1,0 +1,10 @@
+node_modules
+web/node_modules
+web/dist
+data
+runs
+docs
+tests
+scripts
+.redsun
+.env

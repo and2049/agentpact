@@ -78,20 +78,22 @@ function isStructuredOutputRejection(e: unknown): boolean {
 
 function isMalformedObject(e: unknown): boolean {
   const name = String((e as Error)?.name ?? "");
-  return /NoObjectGenerated|TypeValidation|JSONParse/i.test(name);
+  // NoOutputGenerated: the model spent the whole output budget on reasoning and returned no text.
+  return /NoObjectGenerated|NoOutputGenerated|TypeValidation|JSONParse/i.test(name);
 }
 
 /**
  * Run `fn` on the slot's model. On a structured-output rejection by the
  * gateway, switch to the fallback model. On a malformed object (schema
- * mismatch, bad JSON) retry once on whichever model was in use.
+ * mismatch, bad JSON, or no output because reasoning ate the budget) retry once on whichever model was
+ * in use, passing `attempt = 1` so the caller can widen `maxOutputTokens`.
  */
-export async function withFallback<T>(slot: ModelSlot, fn: (m: LanguageModel) => Promise<T>): Promise<T> {
+export async function withFallback<T>(slot: ModelSlot, fn: (m: LanguageModel, attempt: number) => Promise<T>): Promise<T> {
   let model = slot.model;
   let retried = false;
   for (;;) {
     try {
-      return await fn(model);
+      return await fn(model, retried ? 1 : 0); // callers may widen the output budget on the retry
     } catch (e) {
       if (slot.fallback && model !== slot.fallback && isStructuredOutputRejection(e)) {
         model = slot.fallback;

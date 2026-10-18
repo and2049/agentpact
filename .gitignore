@@ -1,4 +1,6 @@
 .env
 node_modules/
 runs/
-data/*.db
+data/
+web/dist/
+web/node_modules/

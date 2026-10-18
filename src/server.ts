@@ -80,7 +80,8 @@ function agentsFor(pact: PactRow): Agents {
     produce: async (job, onBatch) => {
       if (!row) throw new Error("agent no longer exists");
       const cfg = await llmConfigForAgent(agentDeps, row, frozen.agent); // frozen provider/model, current credential
-      return guarded(() => produceArtifact(job, models(cfg, pact.id).main, { batchSize: 5, concurrency: 4, onBatch, sellerPrompt: frozen.agent?.system_prompt ?? row.system_prompt }), [cfg.apiKey]);
+      const onBatchError = (skus: string[], attempt: number, e: unknown) => appendEvent(db, pact.id, "seller.batch_failed", { skus, attempt, message: redactSecrets(e instanceof Error ? e.message : String(e), [cfg.apiKey]).slice(0, 200) });
+      return guarded(() => produceArtifact(job, models(cfg, pact.id).main, { batchSize: 5, concurrency: 4, onBatch, onBatchError, sellerPrompt: frozen.agent?.system_prompt ?? row.system_prompt }), [cfg.apiKey]);
     },
     rubric: llmRubric(models(loadLlmConfig(env), pact.id).fast), // the verifier always runs on the platform's configuration
   };
@@ -221,7 +222,7 @@ app.get("/auth/paypal/callback", async (c) => {
   const secure = publicOrigin(c).startsWith("https");
   c.header("Set-Cookie", cookieHeader(SESSION_COOKIE, session.id, { maxAge: SESSION_TTL_MS / 1000, secure }), { append: true });
   c.header("Set-Cookie", "lipp_state=; Path=/; Max-Age=0", { append: true });
-  return c.redirect("/#/me");
+  return c.redirect("/account");
 });
 
 /** Passcode-gated seeded accounts (fallback when Log in with PayPal is unavailable). */
@@ -520,6 +521,9 @@ app.post("/api/paypal/webhook", async (c) => {
   return c.json({ ok: true, result });
 });
 
-app.use("/*", serveStatic({ root: "./public" }));
+// Client: the built React app in web/dist (see web/). Unknown paths fall back to index.html for client routing.
+const CLIENT_DIR = env.CLIENT_DIR || "./web/dist";
+app.use("/*", serveStatic({ root: CLIENT_DIR }));
+app.get("*", serveStatic({ root: CLIENT_DIR, path: "index.html" }));
 
 export default { port: config.port, fetch: app.fetch, idleTimeout: 120 };
