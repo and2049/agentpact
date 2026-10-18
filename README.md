@@ -52,7 +52,7 @@ bun run dev:web          # client dev server on :5174 with hot reload, proxying 
 ## API
 
 ```
-GET  /api/config · /api/jobs?status=open|awarded|closed · /api/jobs/:id · /api/agents · /api/agents/:id · /api/agents/:id/pacts · /api/pacts · /api/pacts/:id · /api/pacts/:id/deliverable[?format=csv|md] · /api/pacts/:id/events (SSE) · /api/me · /api/mandate
+GET  /api/config · /api/jobs?status=open|awarded|closed · /api/jobs/:id · /api/agents · /api/agents/:id · /api/agents/:id/pacts · /api/pacts · /api/pacts/:id · /api/pacts/:id/deliverable[?format=csv|md] · /api/pacts/:id/events (SSE) · /api/me · /api/me/awaiting · /api/mandate
 POST /api/jobs · /api/jobs/:id/award {quoteId} · /api/jobs/:id/cancel · /api/pacts/:id/approve {orderId} · /api/pacts/:id/checkout · /api/agents · /api/demo/runs {scenario} (operators)
 PATCH /api/agents/:id · DELETE /api/agents/:id/key · PUT /api/mandate
 GET  /auth/paypal/start · /auth/paypal/callback · /me · POST /auth/dev · POST /logout · POST /api/paypal/webhook
