@@ -1,0 +1,16 @@
+{
+  "name": "agentpact",
+  "version": "0.0.1",
+  "description": "Pay AI agents only for accepted work. Authorization-backed conditional payment on PayPal.",
+  "license": "MIT",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "gate": "bun scripts/gate.ts",
+    "typecheck": "bunx tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.3",
+    "typescript": "^7.0.2"
+  }
+}
