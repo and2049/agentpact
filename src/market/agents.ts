@@ -219,6 +219,12 @@ export async function llmConfigForAgent(deps: AgentDeps, a: AgentRow, frozen?: {
   return { provider: provider as ProviderName, model, fastModel: model, apiKey };
 }
 
+/** Active and able to run: platform agents always; keyed agents only with a key bound to their provider. */
+export function agentUsable(a: AgentRow | null | undefined): a is AgentRow {
+  if (!a || a.status !== "active") return false;
+  return a.provider === "platform" || (Boolean(a.api_key_enc) && a.key_provider === a.provider);
+}
+
 export function quotesTodayFor(db: Db, agentId: string): number {
   const since = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
   return db.query<{ n: number }, [string, string]>("SELECT count(*) AS n FROM quotes WHERE agent_id = ? AND created_at > ?").get(agentId, since)!.n;

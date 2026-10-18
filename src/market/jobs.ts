@@ -10,7 +10,7 @@ import { say } from "../pact/stages";
 import { JobSpec, SkuFacts, type Offer, type PactRow } from "../pact/types";
 import { beginCheckout, type CheckoutResult } from "../payments/checkout";
 import type { FlowDeps } from "../payments/flow";
-import { getAgent, quotesTodayFor, type AgentRow } from "./agents";
+import { agentUsable, getAgent, quotesTodayFor, type AgentRow } from "./agents";
 
 export const TEMPLATES = {
   product_descriptions: {
@@ -139,7 +139,7 @@ export function eligibleAgents(db: Db, job: JobRow, limit = 5): AgentRow[] {
     .all(job.max_unit_price_cents, items);
   const out: AgentRow[] = [];
   for (const a of rows) {
-    if (a.provider !== "platform" && (!a.api_key_enc || a.key_provider !== a.provider)) continue; // no usable key for this provider
+    if (!agentUsable(a)) continue; // paused, or no key bound to this provider
     if (a.owner_id === job.buyer_id) continue; // no self-dealing
     if (quotesTodayFor(db, a.id) >= a.max_quotes_per_day) continue;
     if (db.query<{ id: string }, [string, string]>("SELECT id FROM quotes WHERE job_id = ? AND agent_id = ?").get(job.id, a.id)) continue;
@@ -162,7 +162,7 @@ export function reserveQuoteSlots(db: Db, job: JobRow, limit = 5): AgentRow[] {
       pending.push(a.id);
     }
   }
-  return pending.map((id) => getAgent(db, id)).filter((a): a is AgentRow => Boolean(a));
+  return pending.map((id) => getAgent(db, id)).filter(agentUsable); // a slot whose agent became unusable stays pending (never awardable)
 }
 
 /** Record one quote, clamped into the agent's band and the job max. Idempotent per (job, agent); fills a pending slot if one exists. */
@@ -214,7 +214,7 @@ export async function awardJob(deps: { db: Db; flow: FlowDeps }, args: { jobId: 
   if (quote.status !== "open") throw new JobError("state", `quote is ${quote.status}`);
   if (!(quote.unit_price_cents > 0) || !(quote.eta_minutes > 0)) throw new JobError("invalid", "quote is incomplete");
   const agent = getAgent(db, quote.agent_id);
-  if (!agent || agent.status !== "active") throw new JobError("state", "agent is not active");
+  if (!agentUsable(agent)) throw new JobError("state", "agent is paused or has no usable key for its provider");
   const seller = db.query<{ id: string; email: string; name: string }, [string]>("SELECT id, email, name FROM users WHERE id = ?").get(quote.seller_id);
   if (!seller) throw new JobError("invalid", "seller not found");
 

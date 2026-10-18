@@ -230,6 +230,14 @@ describe("marketplace", () => {
     db.run("UPDATE agents SET key_provider = NULL WHERE id = ?", [a.id]); // as a pre-migration row would look
     const job = createJob(db, buyer.id, { template: "product_descriptions", title: "Legacy job", brief: "Write a short, factual product description per SKU.", items: [{ sku: "A", facts: { name: "A" } }], maxUnitPriceCents: 100 });
     expect(eligibleAgents(db, job).map((x) => x.id)).not.toContain(a.id); // ambiguous until re-keyed or migrated
+    // an older open quote from that agent cannot be awarded, and a pending slot is not resumed
+    db.run("INSERT INTO quotes (id, job_id, agent_id, seller_id, unit_price_cents, eta_minutes, message, status, created_at) VALUES ('legacy-q', ?, ?, ?, 50, 5, 'old', 'open', '2026-01-01')", [job.id, a.id, other.id]);
+    const { awardJob: award } = await import("../src/market/jobs");
+    const { FakePayPal: Fake } = await import("./fake-paypal");
+    await expect(award({ db, flow: { db, paypal: new Fake(), buyerCard: TEST_CARD, sellerEmail: "x@sb" } }, { jobId: job.id, quoteId: "legacy-q", buyerId: buyer.id })).rejects.toThrow(/usable key/);
+    db.run("UPDATE quotes SET status = 'pending' WHERE id = 'legacy-q'");
+    expect(reserveQuoteSlots(db, job)).toEqual([]);
+    db.run("DELETE FROM quotes WHERE id = 'legacy-q'");
     const { openDb: reopen } = await import("../src/db");
     void reopen; // the migration statement runs in openDb(); apply it directly here on the in-memory db
     db.run("UPDATE agents SET key_provider = provider WHERE api_key_enc IS NOT NULL AND key_provider IS NULL AND provider != 'platform' AND updated_at = created_at");
