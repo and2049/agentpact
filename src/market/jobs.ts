@@ -212,6 +212,7 @@ export async function awardJob(deps: { db: Db; flow: FlowDeps }, args: { jobId: 
   const quote = getQuote(db, args.quoteId);
   if (!quote || quote.job_id !== job.id) throw new JobError("invalid", "quote does not belong to this job");
   if (quote.status !== "open") throw new JobError("state", `quote is ${quote.status}`);
+  if (!(quote.unit_price_cents > 0) || !(quote.eta_minutes > 0)) throw new JobError("invalid", "quote is incomplete");
   const agent = getAgent(db, quote.agent_id);
   if (!agent || agent.status !== "active") throw new JobError("state", "agent is not active");
   const seller = db.query<{ id: string; email: string; name: string }, [string]>("SELECT id, email, name FROM users WHERE id = ?").get(quote.seller_id);
@@ -239,7 +240,7 @@ export async function awardJob(deps: { db: Db; flow: FlowDeps }, args: { jobId: 
       [job.id, quote.id, agent.id, job.buyer_id, seller.id, seller.email, JSON.stringify(frozen), pact.id],
     );
     db.run("UPDATE jobs SET pact_id = ? WHERE id = ?", [pact.id, job.id]);
-    db.run("UPDATE quotes SET status = CASE WHEN id = ? THEN 'awarded' ELSE 'lost' END WHERE job_id = ?", [quote.id, job.id]);
+    db.run("UPDATE quotes SET status = CASE WHEN id = ? THEN 'awarded' ELSE 'lost' END WHERE job_id = ? AND status IN ('open', 'awarded', 'lost')", [quote.id, job.id]); // pending slots stay pending
     appendEvent(db, pact.id, "run.started", { kind: "market", jobId: job.id, itemCount: spec.skus.length, maxUnitPriceCents: spec.maxUnitPriceCents });
     say(db, pact.id, "buyer", `Awarded "${job.title}" to ${agent.name} at ${offer.unitPriceCents}¢ per item (${spec.skus.length} items). Payment is per accepted item after verification.`);
     say(db, pact.id, "seller", offer.note, { quote: offer });

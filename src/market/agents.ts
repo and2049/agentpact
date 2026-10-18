@@ -19,6 +19,8 @@ export interface AgentRow {
   provider: AgentProvider;
   model: string;
   api_key_enc: string | null;
+  /** Provider the sealed key was issued for; a frozen pact refuses a key of another provider. */
+  key_provider: AgentProvider | null;
   system_prompt: string;
   min_unit_price_cents: number;
   max_unit_price_cents: number;
@@ -45,7 +47,7 @@ const AgentFields = {
   description: z.string().trim().max(500),
   provider: z.enum(AGENT_PROVIDERS),
   model: z.string().trim().max(80),
-  apiKey: z.string().trim().max(400).optional(),
+  apiKey: z.string().trim().min(16).max(400).optional(),
   systemPrompt: z.string().trim().max(2000),
   minUnitPriceCents: z.number().int().min(1).max(100_000),
   maxUnitPriceCents: z.number().int().min(1).max(100_000),
@@ -87,9 +89,9 @@ export async function createAgent(deps: AgentDeps, ownerId: string, input: Agent
   const id = crypto.randomUUID();
   const ts = now();
   db.run(
-    `INSERT INTO agents (id, owner_id, name, description, provider, model, api_key_enc, system_prompt, min_unit_price_cents, max_unit_price_cents, max_items_per_job, max_quotes_per_day, status, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [id, ownerId, input.name, input.description, input.provider, input.model, enc, input.systemPrompt, input.minUnitPriceCents, input.maxUnitPriceCents, input.maxItemsPerJob, input.maxQuotesPerDay, input.status, ts, ts],
+    `INSERT INTO agents (id, owner_id, name, description, provider, model, api_key_enc, key_provider, system_prompt, min_unit_price_cents, max_unit_price_cents, max_items_per_job, max_quotes_per_day, status, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [id, ownerId, input.name, input.description, input.provider, input.model, enc, enc ? input.provider : null, input.systemPrompt, input.minUnitPriceCents, input.maxUnitPriceCents, input.maxItemsPerJob, input.maxQuotesPerDay, input.status, ts, ts],
   );
   return getAgent(db, id)!;
 }
@@ -126,10 +128,13 @@ export async function updateAgent(deps: AgentDeps, ownerId: string, id: string, 
   });
   if (merged.provider === "platform" && cur.provider !== "platform" && ownerIsNotPlatform(deps, ownerId)) throw new AgentError("forbidden", "the platform provider is reserved for seeded agents");
   const enc = merged.apiKey ? await seal(merged.apiKey, secretOrThrow(deps)) : cur.api_key_enc;
+  const keyProvider: AgentProvider | null = merged.apiKey ? merged.provider : cur.key_provider;
   if (merged.provider !== "platform" && !enc) throw new AgentError("invalid", "apiKey is required for a keyed provider");
+  // A key is bound to the provider it was supplied for: switching provider needs a key for that provider.
+  if (merged.provider !== "platform" && keyProvider !== merged.provider) throw new AgentError("invalid", `the stored key is for ${keyProvider}; supply an apiKey for ${merged.provider}`);
   db.run(
-    `UPDATE agents SET name = ?, description = ?, provider = ?, model = ?, api_key_enc = ?, system_prompt = ?, min_unit_price_cents = ?, max_unit_price_cents = ?, max_items_per_job = ?, max_quotes_per_day = ?, status = ?, updated_at = ? WHERE id = ?`,
-    [merged.name, merged.description, merged.provider, merged.model, enc, merged.systemPrompt, merged.minUnitPriceCents, merged.maxUnitPriceCents, merged.maxItemsPerJob, merged.maxQuotesPerDay, merged.status, now(), id],
+    `UPDATE agents SET name = ?, description = ?, provider = ?, model = ?, api_key_enc = ?, key_provider = ?, system_prompt = ?, min_unit_price_cents = ?, max_unit_price_cents = ?, max_items_per_job = ?, max_quotes_per_day = ?, status = ?, updated_at = ? WHERE id = ?`,
+    [merged.name, merged.description, merged.provider, merged.model, enc, keyProvider, merged.systemPrompt, merged.minUnitPriceCents, merged.maxUnitPriceCents, merged.maxItemsPerJob, merged.maxQuotesPerDay, merged.status, now(), id],
   );
   return getAgent(db, id)!;
 }
@@ -139,7 +144,7 @@ export function deleteAgentKey(db: Db, ownerId: string, id: string): AgentRow {
   const cur = getAgent(db, id);
   if (!cur) throw new AgentError("not_found", "agent not found");
   if (cur.owner_id !== ownerId) throw new AgentError("forbidden", "not your agent");
-  db.run("UPDATE agents SET api_key_enc = NULL, status = CASE WHEN provider = 'platform' THEN status ELSE 'paused' END, updated_at = ? WHERE id = ?", [now(), id]);
+  db.run("UPDATE agents SET api_key_enc = NULL, key_provider = NULL, status = CASE WHEN provider = 'platform' THEN status ELSE 'paused' END, updated_at = ? WHERE id = ?", [now(), id]);
   return getAgent(db, id)!;
 }
 
@@ -208,6 +213,7 @@ export async function llmConfigForAgent(deps: AgentDeps, a: AgentRow, frozen?: {
   const model = frozen?.model ?? a.model;
   if (provider === "platform") return loadLlmConfig(deps.env);
   if (!a.api_key_enc) throw new AgentError("invalid", "agent has no API key");
+  if (a.key_provider !== provider) throw new AgentError("invalid", `the agent's stored key is for ${a.key_provider ?? "no provider"}, the pact was frozen on ${provider}`);
   if (!modelAllowed(provider, model)) throw new AgentError("invalid", "model is not on the allowlist");
   const apiKey = await open(a.api_key_enc, secretOrThrow(deps));
   return { provider: provider as ProviderName, model, fastModel: model, apiKey };

@@ -146,36 +146,72 @@ export async function completeCheckout(deps: FlowDeps, pactId: string, orderId: 
 export interface SweepResult {
   /** Pacts moved to CHECKOUT_EXPIRED (reservation released). */
   expired: string[];
-  /** Pacts promoted to HELD from a recorded/reconciled authorization; the caller must schedule their work. */
+  /** Pacts promoted to HELD from a recorded/reconciled authorization; work must be scheduled for them. */
   held: string[];
 }
 
 type Lock = <T>(pactId: string, fn: () => Promise<T>) => Promise<T>;
 const noLock: Lock = (_id, fn) => fn();
+/** An authorize op row still `pending` after this long was orphaned by a crash, not left by a live approve call. */
+export const IN_FLIGHT_MS = 2 * 60 * 1000;
+
+export interface SweepOptions {
+  at?: string;
+  lock?: Lock;
+  /** Called inside the pact lock as soon as a pact is promoted, so scheduling cannot be lost to a later failure. */
+  onHeld?: (pactId: string) => void;
+  onExpired?: (pactId: string) => void;
+  inFlightMs?: number;
+}
 
 /**
- * Checkout sweeper. Safe to call on a schedule. Each pact is handled under the
- * caller's per-pact lock so it cannot interleave with the approve route.
- *  1. AGREED pacts that already have a CREATED authorization (webhook, or a crash
- *     between recording and transitioning) are promoted to HELD regardless of deadline.
- *  2. Past the deadline: an in-flight or unknown authorize op keeps the reservation
- *     (reconcile from the order first); otherwise CHECKOUT_EXPIRED + release.
+ * Checkout sweeper. Safe to call on a schedule. Each pact is handled under the caller's
+ * per-pact lock so it cannot interleave with the approve route.
+ *  1. AGREED pacts with a usable authorization (webhook-recorded, or a crash between recording
+ *     and transitioning) are promoted to HELD regardless of deadline.
+ *  2. An authorize op orphaned `pending` by a crash is resumed with its own request id.
+ *  3. Past the deadline: a live or unknown authorize op keeps the reservation (reconcile from
+ *     the order first); otherwise CHECKOUT_EXPIRED + release. Market pacts whose order was
+ *     never created expire CHECKOUT_TTL after their last update.
  */
-export async function expireCheckouts(deps: FlowDeps, opts: { at?: string; lock?: Lock } = {}): Promise<SweepResult> {
+export async function expireCheckouts(deps: FlowDeps, opts: SweepOptions = {}): Promise<SweepResult> {
   const { db, paypal } = deps;
   const at = opts.at ?? now();
   const lock = opts.lock ?? noLock;
+  const inFlightMs = opts.inFlightMs ?? IN_FLIGHT_MS;
   const result: SweepResult = { expired: [], held: [] };
   const rows = db
-    .query<{ id: string; order_id: string; mandate_id: string; checkout_deadline: string | null }, []>("SELECT id, order_id, mandate_id, checkout_deadline FROM pacts WHERE status = 'AGREED' AND order_id IS NOT NULL")
+    .query<{ id: string; order_id: string | null; mandate_id: string; checkout_deadline: string | null; kind: string; updated_at: string }, []>(
+      "SELECT id, order_id, mandate_id, checkout_deadline, kind, updated_at FROM pacts WHERE status = 'AGREED' AND (order_id IS NOT NULL OR kind = 'market')",
+    )
     .all();
+  const expire = (id: string, mandateId: string, payload: unknown) => {
+    const tx = db.transaction(() => {
+      const again = getPact(db, id);
+      if (!again || again.status !== "AGREED") return false;
+      transition(db, id, "CHECKOUT_EXPIRED", {}, payload);
+      settleReservation(db, { mandateId, pactId: id, capturedCents: 0 });
+      return true;
+    });
+    if (tx()) {
+      result.expired.push(id);
+      opts.onExpired?.(id);
+    }
+  };
   for (const r of rows) {
     await lock(r.id, async () => {
       const cur = getPact(db, r.id);
       if (!cur || cur.status !== "AGREED") return;
+      if (!r.order_id) {
+        // Award committed but order creation never completed; the buyer can retry for one TTL.
+        if (new Date(r.updated_at).getTime() + CHECKOUT_TTL_MS < new Date(at).getTime()) expire(r.id, r.mandate_id, { reason: "order never created" });
+        return;
+      }
+      const orderId = r.order_id;
       const promote = (auth: { id: string; amount_cents: number; expires_at: string | null }, via: string) => {
-        transition(db, r.id, "HELD", { authorized_cents: auth.amount_cents }, { orderId: r.order_id, authorizationId: auth.id, amountCents: auth.amount_cents, expiresAt: auth.expires_at, via });
+        transition(db, r.id, "HELD", { authorized_cents: auth.amount_cents }, { orderId, authorizationId: auth.id, amountCents: auth.amount_cents, expiresAt: auth.expires_at, via });
         result.held.push(r.id);
+        opts.onHeld?.(r.id);
       };
       const recorded = authorizationForPact(db, r.id);
       if (recorded) {
@@ -183,28 +219,33 @@ export async function expireCheckouts(deps: FlowDeps, opts: { at?: string; lock?
         if (recorded.status === "PENDING") return; // not usable yet, not dead either
         // DENIED / VOIDED / EXPIRED: fall through to the deadline check below
       }
+      const authOp = getOp(db, `${r.id}:authorize`);
+      if (authOp?.status === "pending") {
+        if (new Date(authOp.updated_at).getTime() + inFlightMs > Date.now()) return; // approve route is mid-call; keep the reservation
+        // Orphaned by a crash between the HTTP call and the row update: resume with the same request id.
+        const resumed = await completeCheckout(deps, r.id, orderId);
+        if (resumed.ok && resumed.pact.status === "HELD") {
+          result.held.push(r.id);
+          opts.onHeld?.(r.id);
+          return;
+        }
+        if (resumed.ok || resumed.code === "unknown") return;
+        // not_approved / failed: continue to the deadline check
+      }
       const past = Boolean(r.checkout_deadline && r.checkout_deadline < at);
       if (!past) return;
-      const authOp = getOp(db, `${r.id}:authorize`);
-      if (authOp?.status === "pending") return; // approve route is mid-call; keep the reservation
-      if (authOp && authOp.status !== "failed") {
+      const op = getOp(db, `${r.id}:authorize`);
+      if (op && op.status !== "failed") {
         // succeeded-but-not-transitioned or unknown: the order is the source of truth
-        const order = await paypal.getOrder(r.order_id).catch(() => null);
+        const order = await paypal.getOrder(orderId).catch(() => null);
         const auth = order?.purchase_units[0]?.payments?.authorizations?.[0];
         if (auth) {
-          const row = recordAuthorization(db, r.id, r.order_id, auth);
+          const row = recordAuthorization(db, r.id, orderId, auth);
           if (row.status === "CREATED") return promote(row, "reconcile");
         }
-        if (authOp.status === "unknown" && !order) return; // still unknown; keep the reservation
+        if (op.status === "unknown" && !order) return; // still unknown; keep the reservation
       }
-      const tx = db.transaction(() => {
-        const again = getPact(db, r.id);
-        if (!again || again.status !== "AGREED") return false;
-        transition(db, r.id, "CHECKOUT_EXPIRED", {}, { orderId: r.order_id });
-        settleReservation(db, { mandateId: r.mandate_id, pactId: r.id, capturedCents: 0 });
-        return true;
-      });
-      if (tx()) result.expired.push(r.id);
+      expire(r.id, r.mandate_id, { orderId });
     });
   }
   return result;

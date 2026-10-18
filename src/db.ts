@@ -134,6 +134,7 @@ CREATE TABLE IF NOT EXISTS agents (
   provider TEXT NOT NULL,              -- platform | opencode | anthropic | openai
   model TEXT NOT NULL DEFAULT '',
   api_key_enc TEXT,
+  key_provider TEXT,                   -- provider the sealed key belongs to
   system_prompt TEXT NOT NULL DEFAULT '',
   min_unit_price_cents INTEGER NOT NULL,
   max_unit_price_cents INTEGER NOT NULL,
@@ -212,6 +213,7 @@ const MIGRATIONS: Array<{ table: string; column: string; ddl: string }> = [
   { table: "pacts", column: "payout_recipient", ddl: "ALTER TABLE pacts ADD COLUMN payout_recipient TEXT" },
   { table: "pacts", column: "frozen_json", ddl: "ALTER TABLE pacts ADD COLUMN frozen_json TEXT" },
   { table: "mandates", column: "owner_id", ddl: "ALTER TABLE mandates ADD COLUMN owner_id TEXT" },
+  { table: "agents", column: "key_provider", ddl: "ALTER TABLE agents ADD COLUMN key_provider TEXT" },
 ];
 
 export function openDb(path = ":memory:"): Db {

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { openDb } from "../src/db";
-import { createMandate, getMandate } from "../src/mandate";
-import { createPact, transition } from "../src/pact/machine";
+import { createMandate, getMandate, reserve } from "../src/mandate";
+import { createPact, getPact, transition } from "../src/pact/machine";
 import { beginCheckout, completeCheckout, expireCheckouts } from "../src/payments/checkout";
 import type { FlowDeps } from "../src/payments/flow";
 import { settlePact } from "../src/payments/flow";
@@ -114,7 +114,7 @@ describe("checkout hold path", () => {
     const orderId = b.ok ? b.pact.order_id! : "";
     await Bun.sleep(5);
     // Simulate the approve route mid-call: the op row exists and is pending.
-    db.run("INSERT INTO payment_ops (op_id, pact_id, kind, request_id, status, attempts, created_at, updated_at) VALUES (?, ?, 'authorize_order', 'r1', 'pending', 1, '2026', '2026')", [`${p.id}:authorize`, p.id]);
+    db.run("INSERT INTO payment_ops (op_id, pact_id, kind, request_id, status, attempts, created_at, updated_at) VALUES (?, ?, 'authorize_order', 'r1', 'pending', 1, ?, ?)", [`${p.id}:authorize`, p.id, new Date().toISOString(), new Date().toISOString()]);
     let r = await expireCheckouts(deps);
     expect(r).toEqual({ expired: [], held: [] });
     expect(getMandate(db, m.id)!.reserved_cents).toBe(300);
@@ -154,5 +154,38 @@ describe("checkout hold path", () => {
     expect(s!.status).toBe("SETTLED");
     expect(s!.settlement_kind).toBe("partial");
     expect(s!.charge_cents).toBe(100);
+  });
+
+  test("an authorize op orphaned as pending by a crash is resumed by the sweeper with the same request id", async () => {
+    const { db, deps, p, m, pp } = setup();
+    const b = await beginCheckout(deps, p.id);
+    const orderId = b.ok ? b.pact.order_id! : "";
+    pp.approveOrder(orderId);
+    // The HTTP call happened (PayPal holds the money) but the process died before the op row was updated.
+    const order = await pp.authorizeOrder({ requestId: "crash-req", orderId });
+    expect(order.purchase_units[0]!.payments!.authorizations![0]!.status).toBe("CREATED");
+    db.run("INSERT INTO payment_ops (op_id, pact_id, kind, request_id, status, attempts, created_at, updated_at) VALUES (?, ?, 'authorize_order', 'crash-req', 'pending', 1, '2026-01-01', '2026-01-01')", [`${p.id}:authorize`, p.id]);
+    const held: string[] = [];
+    const r = await expireCheckouts(deps, { onHeld: (id) => held.push(id) });
+    expect(r.held).toEqual([p.id]);
+    expect(held).toEqual([p.id]);
+    expect(getPact(db, p.id)!.status).toBe("HELD");
+    expect(pp.auths.size).toBe(1); // replayed request id, no second hold
+    expect(getMandate(db, m.id)!.reserved_cents).toBe(300);
+    // a *recent* pending op is left alone
+    const { db: db2, deps: deps2, p: p2 } = setup();
+    const b2 = await beginCheckout(deps2, p2.id);
+    db2.run("INSERT INTO payment_ops (op_id, pact_id, kind, request_id, status, attempts, created_at, updated_at) VALUES (?, ?, 'authorize_order', 'live', 'pending', 1, ?, ?)", [`${p2.id}:authorize`, p2.id, new Date().toISOString(), new Date().toISOString()]);
+    expect(await expireCheckouts(deps2)).toEqual({ expired: [], held: [] });
+    expect(b2.ok).toBe(true);
+  });
+
+  test("a market pact whose order was never created expires one TTL after its last update", async () => {
+    const { db, deps, p, m } = setup();
+    reserve(db, { mandateId: m.id, pactId: p.id, amountCents: 300, category: "product_descriptions", seller: SELLER });
+    db.run("UPDATE pacts SET kind = 'market', updated_at = '2026-01-01T00:00:00.000Z' WHERE id = ?", [p.id]);
+    const r = await expireCheckouts(deps);
+    expect(r.expired).toEqual([p.id]);
+    expect(getMandate(db, m.id)!.reserved_cents).toBe(0);
   });
 });

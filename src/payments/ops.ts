@@ -23,6 +23,8 @@ export interface OpRow {
   resource_id: string | null;
   response_json: string | null;
   error_text: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export type OpResult<T> =

@@ -191,4 +191,35 @@ describe("marketplace", () => {
     expect(redactSecrets("token=abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG")).not.toContain("abcdefghijkl");
     expect(redactSecrets("order 5VC69492KA9111029 failed")).toContain("5VC69492KA9111029"); // short ids survive
   });
+
+  test("pending quote slots are never awardable and survive award/reopen untouched", async () => {
+    const { db, buyer, other, agent, flow, job } = setup();
+    const agent2 = ensureSeedAgent(db, other.id);
+    reserveQuoteSlots(db, job); // agent + agent2 pending
+    const q1 = recordQuote(db, job, agent, { unitPriceCents: 100, etaMinutes: 3, message: "" });
+    const pending = listQuotes(db, job.id).find((q) => q.agent_id === agent2.id)!;
+    expect(pending.status).toBe("pending");
+    await expect(awardJob({ db, flow }, { jobId: job.id, quoteId: pending.id, buyerId: buyer.id })).rejects.toThrow(/pending|incomplete/);
+    const r = await awardJob({ db, flow }, { jobId: job.id, quoteId: q1.id, buyerId: buyer.id });
+    expect(listQuotes(db, job.id).find((q) => q.agent_id === agent2.id)!.status).toBe("pending");
+    db.run("UPDATE pacts SET checkout_deadline = '2000-01-01T00:00:00.000Z' WHERE id = ?", [r.pact.id]);
+    await expireCheckouts(flow);
+    reopenJobFor(db, getPact(db, r.pact.id)!);
+    expect(listQuotes(db, job.id).map((q) => q.status).sort()).toEqual(["open", "pending"]);
+  });
+
+  test("a stored key is bound to its provider: switching provider needs a new key, and a frozen pact refuses a mismatched key", async () => {
+    const { db, other } = setup();
+    const deps: AgentDeps = { db, env: { AGENT_KEY_SECRET: "test-secret" } };
+    const a = await createAgent(deps, other.id, { name: "Mine", description: "", provider: "openai", model: "gpt-5.5", apiKey: "sk-openai-1234567890", systemPrompt: "", minUnitPriceCents: 10, maxUnitPriceCents: 100, maxItemsPerJob: 20, maxQuotesPerDay: 20, status: "active" });
+    expect(a.key_provider).toBe("openai");
+    await expect(updateAgent(deps, other.id, a.id, { provider: "anthropic", model: "claude-sonnet-5-5" })).rejects.toThrow(/supply an apiKey for anthropic/);
+    const b = await updateAgent(deps, other.id, a.id, { provider: "anthropic", model: "claude-sonnet-5-5", apiKey: "sk-ant-abcdefghijklmnop" });
+    expect(b.key_provider).toBe("anthropic");
+    // the pact was frozen on openai: the anthropic key must never be sent to openai
+    await expect(llmConfigForAgent(deps, b, { provider: "openai", model: "gpt-5.5" })).rejects.toThrow(/stored key is for anthropic/);
+    const ok = await llmConfigForAgent(deps, b, { provider: "anthropic", model: "claude-sonnet-5-5" });
+    expect(ok.apiKey).toBe("sk-ant-abcdefghijklmnop");
+    expect(AgentInput.safeParse({ name: "x1", provider: "openai", model: "gpt-5.5", apiKey: "short", minUnitPriceCents: 1, maxUnitPriceCents: 2 }).success).toBe(false);
+  });
 });

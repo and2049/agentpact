@@ -177,12 +177,14 @@ export class Worker {
         await this.deps.quoteJob?.(task.subject_id);
         return null;
       case "sweep": {
-        const r = await expireCheckouts(this.deps.flow, { lock: withPactLock });
-        for (const id of r.expired) {
-          const p = this.db.query<PactRow, [string]>("SELECT * FROM pacts WHERE id = ?").get(id);
-          if (p) this.deps.onTerminal?.(p);
-        }
-        for (const id of r.held) enqueue(this.db, id, "advance");
+        await expireCheckouts(this.deps.flow, {
+          lock: withPactLock,
+          onHeld: (id) => enqueue(this.db, id, "advance"), // scheduled inside the lock, before the sweep moves on
+          onExpired: (id) => {
+            const p = this.db.query<PactRow, [string]>("SELECT * FROM pacts WHERE id = ?").get(id);
+            if (p) this.deps.onTerminal?.(p);
+          },
+        });
         return this.deps.sweepMs ?? 60_000;
       }
     }
