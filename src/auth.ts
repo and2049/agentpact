@@ -107,6 +107,6 @@ export function devLogin(db: Db, args: { passcode: string; who: string; env: Rec
   if (!expected || args.passcode !== expected) return null;
   const acct = DEV_ACCOUNTS[args.who];
   if (!acct) return null;
-  const email = args.env[acct.emailEnv] ?? `${args.who}@dev.local`;
+  const email = args.env[acct.emailEnv] || `${args.who}@dev.local`;
   return upsertUser(db, { provider: "dev", providerUserId: args.who, name: acct.name, email });
 }

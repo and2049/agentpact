@@ -125,6 +125,70 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 CREATE INDEX IF NOT EXISTS sessions_user ON sessions(user_id);
 
+-- Marketplace: seller-owned hosted agents. api_key_enc is AES-GCM sealed and never returned.
+CREATE TABLE IF NOT EXISTS agents (
+  id TEXT PRIMARY KEY,
+  owner_id TEXT NOT NULL REFERENCES users(id),
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  provider TEXT NOT NULL,              -- platform | opencode | anthropic | openai
+  model TEXT NOT NULL DEFAULT '',
+  api_key_enc TEXT,
+  system_prompt TEXT NOT NULL DEFAULT '',
+  min_unit_price_cents INTEGER NOT NULL,
+  max_unit_price_cents INTEGER NOT NULL,
+  max_items_per_job INTEGER NOT NULL DEFAULT 20,
+  max_quotes_per_day INTEGER NOT NULL DEFAULT 20,
+  status TEXT NOT NULL DEFAULT 'active', -- active | paused
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS agents_owner ON agents(owner_id);
+
+-- Buyer-owned jobs. items_json is the validated SKU list; one award per job (status guard).
+CREATE TABLE IF NOT EXISTS jobs (
+  id TEXT PRIMARY KEY,
+  buyer_id TEXT NOT NULL REFERENCES users(id),
+  template TEXT NOT NULL,
+  title TEXT NOT NULL,
+  brief TEXT NOT NULL,
+  items_json TEXT NOT NULL,
+  rubric_json TEXT NOT NULL,
+  max_unit_price_cents INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'OPEN',   -- OPEN | AWARDED | CLOSED
+  pact_id TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS jobs_status ON jobs(status, created_at);
+
+CREATE TABLE IF NOT EXISTS quotes (
+  id TEXT PRIMARY KEY,
+  job_id TEXT NOT NULL REFERENCES jobs(id),
+  agent_id TEXT NOT NULL REFERENCES agents(id),
+  seller_id TEXT NOT NULL REFERENCES users(id),
+  unit_price_cents INTEGER NOT NULL,
+  eta_minutes INTEGER NOT NULL,
+  message TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open',   -- open | awarded | lost
+  created_at TEXT NOT NULL,
+  UNIQUE (job_id, agent_id)
+);
+
+-- Durable work queue drained by the in-process worker. One row per (subject, kind) in flight.
+CREATE TABLE IF NOT EXISTS tasks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  subject_id TEXT NOT NULL,
+  kind TEXT NOT NULL,                    -- advance | quote_job | sweep
+  status TEXT NOT NULL DEFAULT 'queued', -- queued | running | done | failed
+  run_after TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS tasks_due ON tasks(status, run_after);
+
 CREATE TABLE IF NOT EXISTS webhook_events (
   id TEXT PRIMARY KEY,
   event_type TEXT NOT NULL,
@@ -138,6 +202,16 @@ const MIGRATIONS: Array<{ table: string; column: string; ddl: string }> = [
   { table: "pacts", column: "order_id", ddl: "ALTER TABLE pacts ADD COLUMN order_id TEXT" },
   { table: "pacts", column: "checkout_deadline", ddl: "ALTER TABLE pacts ADD COLUMN checkout_deadline TEXT" },
   { table: "pacts", column: "hold_kind", ddl: "ALTER TABLE pacts ADD COLUMN hold_kind TEXT" },
+  { table: "pacts", column: "kind", ddl: "ALTER TABLE pacts ADD COLUMN kind TEXT NOT NULL DEFAULT 'demo'" },
+  { table: "pacts", column: "scenario", ddl: "ALTER TABLE pacts ADD COLUMN scenario TEXT" },
+  { table: "pacts", column: "job_id", ddl: "ALTER TABLE pacts ADD COLUMN job_id TEXT" },
+  { table: "pacts", column: "quote_id", ddl: "ALTER TABLE pacts ADD COLUMN quote_id TEXT" },
+  { table: "pacts", column: "agent_id", ddl: "ALTER TABLE pacts ADD COLUMN agent_id TEXT" },
+  { table: "pacts", column: "buyer_id", ddl: "ALTER TABLE pacts ADD COLUMN buyer_id TEXT" },
+  { table: "pacts", column: "seller_id", ddl: "ALTER TABLE pacts ADD COLUMN seller_id TEXT" },
+  { table: "pacts", column: "payout_recipient", ddl: "ALTER TABLE pacts ADD COLUMN payout_recipient TEXT" },
+  { table: "pacts", column: "frozen_json", ddl: "ALTER TABLE pacts ADD COLUMN frozen_json TEXT" },
+  { table: "mandates", column: "owner_id", ddl: "ALTER TABLE mandates ADD COLUMN owner_id TEXT" },
 ];
 
 export function openDb(path = ":memory:"): Db {

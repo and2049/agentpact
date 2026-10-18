@@ -14,7 +14,11 @@ export interface Mandate {
   allowed_seller: string;
   reserved_cents: number;
   spent_cents: number;
+  owner_id: string | null;
 }
+
+/** Wildcard for allowed_category / allowed_seller: the marketplace mandates use it; the demo mandate pins both. */
+export const ANY = "*";
 
 export class MandateViolation extends Error {
   constructor(
@@ -27,12 +31,12 @@ export class MandateViolation extends Error {
 
 export function createMandate(
   db: Db,
-  m: { id?: string; maxPerPactCents: number; maxAggregateCents: number; allowedCategory: string; allowedSeller: string },
+  m: { id?: string; maxPerPactCents: number; maxAggregateCents: number; allowedCategory: string; allowedSeller: string; ownerId?: string },
 ): Mandate {
   const id = m.id ?? crypto.randomUUID();
   db.run(
-    "INSERT INTO mandates (id, max_per_pact_cents, max_aggregate_cents, allowed_category, allowed_seller, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-    [id, m.maxPerPactCents, m.maxAggregateCents, m.allowedCategory, m.allowedSeller, now()],
+    "INSERT INTO mandates (id, max_per_pact_cents, max_aggregate_cents, allowed_category, allowed_seller, owner_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    [id, m.maxPerPactCents, m.maxAggregateCents, m.allowedCategory, m.allowedSeller, m.ownerId ?? null, now()],
   );
   return getMandate(db, id)!;
 }
@@ -49,8 +53,8 @@ export function reserve(
   const tx = db.transaction(() => {
     const m = getMandate(db, args.mandateId);
     if (!m) throw new MandateViolation("missing", `mandate ${args.mandateId} not found`);
-    if (args.category !== m.allowed_category) throw new MandateViolation("category", `category ${args.category} not allowed (mandate allows ${m.allowed_category})`);
-    if (args.seller !== m.allowed_seller) throw new MandateViolation("seller", `seller ${args.seller} not allowed`);
+    if (m.allowed_category !== ANY && args.category !== m.allowed_category) throw new MandateViolation("category", `category ${args.category} not allowed (mandate allows ${m.allowed_category})`);
+    if (m.allowed_seller !== ANY && args.seller !== m.allowed_seller) throw new MandateViolation("seller", `seller ${args.seller} not allowed`);
     if (args.amountCents > m.max_per_pact_cents) throw new MandateViolation("per_pact", `${args.amountCents}c exceeds per-pact max ${m.max_per_pact_cents}c`);
     const committed = m.reserved_cents + m.spent_cents + args.amountCents;
     if (committed > m.max_aggregate_cents) throw new MandateViolation("aggregate", `${committed}c would exceed aggregate max ${m.max_aggregate_cents}c`);
@@ -74,6 +78,22 @@ export function settleReservation(db: Db, args: { mandateId: string; pactId: str
     db.run("UPDATE mandates SET reserved_cents = reserved_cents - ?, spent_cents = spent_cents + ? WHERE id = ?", [held, args.capturedCents, args.mandateId]);
     db.run("UPDATE pacts SET reserved_cents = 0, updated_at = ? WHERE id = ?", [now(), args.pactId]);
     return getMandate(db, args.mandateId)!;
+  });
+  return tx();
+}
+
+export function mandateForOwner(db: Db, ownerId: string): Mandate | null {
+  return db.query<Mandate, [string]>("SELECT * FROM mandates WHERE owner_id = ? ORDER BY created_at LIMIT 1").get(ownerId) ?? null;
+}
+
+/** Buyer edits the two caps. Neither may drop below what is already committed. */
+export function updateMandateCaps(db: Db, id: string, caps: { maxPerPactCents: number; maxAggregateCents: number }): Mandate {
+  const tx = db.transaction(() => {
+    const m = getMandate(db, id);
+    if (!m) throw new MandateViolation("missing", `mandate ${id} not found`);
+    if (caps.maxAggregateCents < m.reserved_cents + m.spent_cents) throw new MandateViolation("aggregate", "aggregate cap below committed amount");
+    db.run("UPDATE mandates SET max_per_pact_cents = ?, max_aggregate_cents = ? WHERE id = ?", [caps.maxPerPactCents, caps.maxAggregateCents, id]);
+    return getMandate(db, id)!;
   });
   return tx();
 }

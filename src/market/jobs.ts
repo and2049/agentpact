@@ -1,0 +1,258 @@
+/**
+ * Jobs, quotes and award. Award freezes the agreement into the pact and hands
+ * off to payments/checkout (approval order); nothing here touches settlement.
+ */
+import { z } from "zod";
+import { appendEvent, now, type Db } from "../db";
+import { ANY, createMandate, mandateForOwner, type Mandate } from "../mandate";
+import { createPact, pactHash, transition } from "../pact/machine";
+import { say } from "../pact/stages";
+import { JobSpec, SkuFacts, type Offer, type PactRow } from "../pact/types";
+import { beginCheckout, type CheckoutResult } from "../payments/checkout";
+import type { FlowDeps } from "../payments/flow";
+import { getAgent, quotesTodayFor, type AgentRow } from "./agents";
+
+export const TEMPLATES = {
+  product_descriptions: {
+    name: "Product descriptions",
+    rubric: {
+      criteria: [
+        "Mentions every supplied fact without altering it",
+        "Contains no invented specifications, certifications, awards or comparisons",
+        "Reads as a coherent, specific product description rather than filler",
+      ],
+      threshold: 0.6,
+      minWords: 30,
+      maxWords: 90,
+    },
+  },
+} as const;
+export type TemplateId = keyof typeof TEMPLATES;
+
+export const JobInput = z.object({
+  template: z.literal("product_descriptions").default("product_descriptions"),
+  title: z.string().trim().min(3).max(120),
+  brief: z.string().trim().min(10).max(2000),
+  items: z.array(z.object({ sku: z.string().trim().min(1).max(40), facts: SkuFacts })).min(1).max(20),
+  maxUnitPriceCents: z.number().int().min(1).max(100_000),
+  minWords: z.number().int().min(5).max(500).optional(),
+  maxWords: z.number().int().min(5).max(1000).optional(),
+});
+export type JobInput = z.infer<typeof JobInput>;
+
+export interface JobRow {
+  id: string;
+  buyer_id: string;
+  template: TemplateId;
+  title: string;
+  brief: string;
+  items_json: string;
+  rubric_json: string;
+  max_unit_price_cents: number;
+  status: "OPEN" | "AWARDED" | "CLOSED";
+  pact_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface QuoteRow {
+  id: string;
+  job_id: string;
+  agent_id: string;
+  seller_id: string;
+  unit_price_cents: number;
+  eta_minutes: number;
+  message: string;
+  status: "open" | "awarded" | "lost";
+  created_at: string;
+}
+
+export class JobError extends Error {
+  constructor(
+    public code: "not_found" | "forbidden" | "state" | "invalid",
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+export function createJob(db: Db, buyerId: string, input: JobInput): JobRow {
+  const skus = new Set(input.items.map((i) => i.sku));
+  if (skus.size !== input.items.length) throw new JobError("invalid", "duplicate SKUs");
+  const t = TEMPLATES[input.template];
+  const rubric = { ...t.rubric, minWords: input.minWords ?? t.rubric.minWords, maxWords: input.maxWords ?? t.rubric.maxWords };
+  if (rubric.minWords > rubric.maxWords) throw new JobError("invalid", "minWords must be <= maxWords");
+  const id = crypto.randomUUID();
+  const ts = now();
+  db.run(
+    "INSERT INTO jobs (id, buyer_id, template, title, brief, items_json, rubric_json, max_unit_price_cents, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?)",
+    [id, buyerId, input.template, input.title, input.brief, JSON.stringify(input.items), JSON.stringify(rubric), input.maxUnitPriceCents, ts, ts],
+  );
+  return getJob(db, id)!;
+}
+
+export function getJob(db: Db, id: string): JobRow | null {
+  return db.query<JobRow, [string]>("SELECT * FROM jobs WHERE id = ?").get(id) ?? null;
+}
+
+export function listJobs(db: Db, opts: { status?: JobRow["status"]; buyerId?: string } = {}): JobRow[] {
+  const where: string[] = [];
+  const args: string[] = [];
+  if (opts.status) {
+    where.push("status = ?");
+    args.push(opts.status);
+  }
+  if (opts.buyerId) {
+    where.push("buyer_id = ?");
+    args.push(opts.buyerId);
+  }
+  return db.query<JobRow, string[]>(`SELECT * FROM jobs ${where.length ? "WHERE " + where.join(" AND ") : ""} ORDER BY created_at DESC LIMIT 200`).all(...args);
+}
+
+export function listQuotes(db: Db, jobId: string): QuoteRow[] {
+  return db.query<QuoteRow, [string]>("SELECT * FROM quotes WHERE job_id = ? ORDER BY unit_price_cents, created_at").all(jobId);
+}
+
+export function getQuote(db: Db, id: string): QuoteRow | null {
+  return db.query<QuoteRow, [string]>("SELECT * FROM quotes WHERE id = ?").get(id) ?? null;
+}
+
+/** The JobSpec the pact and verifier work from. `seller` is the recipient email, frozen at award. */
+export function jobSpecOf(job: JobRow, sellerEmail: string): JobSpec {
+  return JobSpec.parse({
+    id: job.id,
+    category: job.template,
+    title: job.title,
+    brief: job.brief,
+    skus: JSON.parse(job.items_json),
+    rubric: JSON.parse(job.rubric_json),
+    maxUnitPriceCents: job.max_unit_price_cents,
+    seller: sellerEmail,
+  });
+}
+
+/** Which active agents may quote this job, within their band, size and daily limits. */
+export function eligibleAgents(db: Db, job: JobRow, limit = 5): AgentRow[] {
+  const items = (JSON.parse(job.items_json) as unknown[]).length;
+  const rows = db
+    .query<AgentRow, [number, number]>("SELECT * FROM agents WHERE status = 'active' AND min_unit_price_cents <= ? AND max_items_per_job >= ? ORDER BY created_at")
+    .all(job.max_unit_price_cents, items);
+  const out: AgentRow[] = [];
+  for (const a of rows) {
+    if (a.provider !== "platform" && !a.api_key_enc) continue;
+    if (a.owner_id === job.buyer_id) continue; // no self-dealing
+    if (quotesTodayFor(db, a.id) >= a.max_quotes_per_day) continue;
+    if (db.query<{ id: string }, [string, string]>("SELECT id FROM quotes WHERE job_id = ? AND agent_id = ?").get(job.id, a.id)) continue;
+    out.push(a);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+/** Record one quote, clamped into the agent's band and the job max. Idempotent per (job, agent). */
+export function recordQuote(db: Db, job: JobRow, agent: AgentRow, q: { unitPriceCents: number; etaMinutes: number; message: string }): QuoteRow {
+  const hi = Math.min(agent.max_unit_price_cents, job.max_unit_price_cents);
+  const price = Math.max(agent.min_unit_price_cents, Math.min(hi, Math.round(q.unitPriceCents)));
+  const id = crypto.randomUUID();
+  db.run(
+    "INSERT OR IGNORE INTO quotes (id, job_id, agent_id, seller_id, unit_price_cents, eta_minutes, message, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?)",
+    [id, job.id, agent.id, agent.owner_id, price, Math.max(1, Math.round(q.etaMinutes)), q.message.slice(0, 400), now()],
+  );
+  return db.query<QuoteRow, [string, string]>("SELECT * FROM quotes WHERE job_id = ? AND agent_id = ?").get(job.id, agent.id)!;
+}
+
+/** Buyer mandate: created on first use with generous sandbox defaults and no category/seller pin. */
+export function mandateForBuyer(db: Db, buyerId: string): Mandate {
+  return mandateForOwner(db, buyerId) ?? createMandate(db, { maxPerPactCents: 5000, maxAggregateCents: 50_000, allowedCategory: ANY, allowedSeller: ANY, ownerId: buyerId });
+}
+
+export interface AwardResult {
+  pact: PactRow;
+  checkout: CheckoutResult;
+}
+
+/**
+ * Award a quote: freeze the agreement into a new pact (one per job, enforced by
+ * the job's status guard), then create the approval order. The pact stays
+ * AGREED until the buyer approves in PayPal and the server authorizes.
+ */
+export async function awardJob(deps: { db: Db; flow: FlowDeps }, args: { jobId: string; quoteId: string; buyerId: string }): Promise<AwardResult> {
+  const { db } = deps;
+  const job = getJob(db, args.jobId);
+  if (!job) throw new JobError("not_found", "job not found");
+  if (job.buyer_id !== args.buyerId) throw new JobError("forbidden", "not your job");
+  if (job.status !== "OPEN") throw new JobError("state", `job is ${job.status}`);
+  const quote = getQuote(db, args.quoteId);
+  if (!quote || quote.job_id !== job.id) throw new JobError("invalid", "quote does not belong to this job");
+  if (quote.status !== "open") throw new JobError("state", `quote is ${quote.status}`);
+  const agent = getAgent(db, quote.agent_id);
+  if (!agent || agent.status !== "active") throw new JobError("state", "agent is not active");
+  const seller = db.query<{ id: string; email: string; name: string }, [string]>("SELECT id, email, name FROM users WHERE id = ?").get(quote.seller_id);
+  if (!seller) throw new JobError("invalid", "seller not found");
+
+  const spec = jobSpecOf(job, seller.email);
+  const offer: Offer = { unitPriceCents: quote.unit_price_cents, etaMinutes: quote.eta_minutes, note: quote.message };
+  const hash = await pactHash(spec, offer);
+  const mandate = mandateForBuyer(db, args.buyerId);
+  const frozen = {
+    quoteId: quote.id,
+    offer,
+    agent: { id: agent.id, name: agent.name, provider: agent.provider, model: agent.model, system_prompt: agent.system_prompt },
+    payout_recipient: seller.email,
+    templateVersion: 1,
+    frozenAt: now(),
+  };
+
+  const tx = db.transaction(() => {
+    const awarded = db.run("UPDATE jobs SET status = 'AWARDED', updated_at = ? WHERE id = ? AND status = 'OPEN'", [now(), job.id]).changes;
+    if (awarded !== 1) throw new JobError("state", "job was already awarded");
+    const pact = createPact(db, mandate.id, spec);
+    db.run(
+      "UPDATE pacts SET kind = 'market', job_id = ?, quote_id = ?, agent_id = ?, buyer_id = ?, seller_id = ?, payout_recipient = ?, frozen_json = ? WHERE id = ?",
+      [job.id, quote.id, agent.id, job.buyer_id, seller.id, seller.email, JSON.stringify(frozen), pact.id],
+    );
+    db.run("UPDATE jobs SET pact_id = ? WHERE id = ?", [pact.id, job.id]);
+    db.run("UPDATE quotes SET status = CASE WHEN id = ? THEN 'awarded' ELSE 'lost' END WHERE job_id = ?", [quote.id, job.id]);
+    appendEvent(db, pact.id, "run.started", { kind: "market", jobId: job.id, itemCount: spec.skus.length, maxUnitPriceCents: spec.maxUnitPriceCents });
+    say(db, pact.id, "buyer", `Awarded "${job.title}" to ${agent.name} at ${offer.unitPriceCents}¢ per item (${spec.skus.length} items). Payment is per accepted item after verification.`);
+    say(db, pact.id, "seller", offer.note, { quote: offer });
+    transition(db, pact.id, "OFFERED", { offer_json: JSON.stringify(offer), unit_price_cents: offer.unitPriceCents }, offer);
+    return transition(db, pact.id, "AGREED", { pact_hash: hash }, { unitPriceCents: offer.unitPriceCents, totalCents: offer.unitPriceCents * spec.skus.length, hash, frozen: true });
+  });
+  const pact = tx();
+  say(db, pact.id, "platform", `Waiting for the buyer to approve a ${offer.unitPriceCents * spec.skus.length}¢ authorization in PayPal. Nothing is captured until verification.`);
+  const checkout = await beginCheckout(deps.flow, pact.id);
+  return { pact: checkout.pact ?? pact, checkout };
+}
+
+/** When a market pact ends without work (hold failed / checkout expired), reopen its job so the buyer can try again. */
+export function reopenJobFor(db: Db, pact: PactRow) {
+  if (pact.kind !== "market" || !pact.job_id) return;
+  if (pact.status !== "HOLD_FAILED" && pact.status !== "CHECKOUT_EXPIRED") return;
+  db.run("UPDATE jobs SET status = 'OPEN', pact_id = NULL, updated_at = ? WHERE id = ? AND pact_id = ?", [now(), pact.job_id, pact.id]);
+  db.run("UPDATE quotes SET status = 'open' WHERE job_id = ?", [pact.job_id]);
+}
+
+/** Public job-board view: no items, no quotes. */
+export function publicJob(db: Db, j: JobRow) {
+  const buyer = db.query<{ name: string }, [string]>("SELECT name FROM users WHERE id = ?").get(j.buyer_id);
+  return {
+    id: j.id,
+    template: j.template,
+    title: j.title,
+    brief: j.brief,
+    item_count: (JSON.parse(j.items_json) as unknown[]).length,
+    max_unit_price_cents: j.max_unit_price_cents,
+    status: j.status,
+    buyer_name: buyer?.name ?? "",
+    quote_count: db.query<{ n: number }, [string]>("SELECT count(*) AS n FROM quotes WHERE job_id = ?").get(j.id)!.n,
+    created_at: j.created_at,
+  };
+}
+
+/** Buyer of the job, or a seller whose agent quoted it. */
+export function canSeeJobDetails(db: Db, job: JobRow, userId: string | null | undefined): boolean {
+  if (!userId) return false;
+  if (job.buyer_id === userId) return true;
+  return Boolean(db.query<{ id: string }, [string, string]>("SELECT id FROM quotes WHERE job_id = ? AND seller_id = ?").get(job.id, userId));
+}

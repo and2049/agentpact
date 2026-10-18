@@ -38,7 +38,7 @@ ACCEPTANCE: ${job.rubric.criteria.join("; ")}`,
 export async function produceArtifact(
   job: JobSpec,
   slot: ModelSlot,
-  opts: { batchSize?: number; concurrency?: number; onBatch?: (items: Artifact) => void } = {},
+  opts: { batchSize?: number; concurrency?: number; onBatch?: (items: Artifact) => void; sellerPrompt?: string } = {},
 ): Promise<Artifact> {
   const size = opts.batchSize ?? 5;
   const chunks: JobSpec["skus"][] = [];
@@ -48,7 +48,7 @@ export async function produceArtifact(
   const worker = async () => {
     while (next < chunks.length) {
       const idx = next++;
-      results[idx] = await produceBatch(job, slot, chunks[idx]!);
+      results[idx] = await produceBatch(job, slot, chunks[idx]!, opts.sellerPrompt);
       opts.onBatch?.(results[idx]!);
     }
   };
@@ -56,7 +56,7 @@ export async function produceArtifact(
   return results.flat();
 }
 
-async function produceBatch(job: JobSpec, slot: ModelSlot, chunk: JobSpec["skus"]): Promise<Artifact> {
+async function produceBatch(job: JobSpec, slot: ModelSlot, chunk: JobSpec["skus"], sellerPrompt?: string): Promise<Artifact> {
   return withFallback(slot, async (model) => {
     const res = await generateText({
       model,
@@ -68,7 +68,8 @@ async function produceBatch(job: JobSpec, slot: ModelSlot, chunk: JobSpec["skus"
         "Do not describe any physical feature, part, closure, mechanism, accessory or performance figure that is not in the supplied facts; use-case and tone language is fine. " +
         "Each description must mention every supplied fact verbatim (same spelling, same numbers and units as given) and must not add any specification, award, certification or comparison that is not in the facts. " +
         `Each description is ${job.rubric.minWords}-${job.rubric.maxWords} words. ` +
-        'Return ONLY a JSON object of the exact shape {"items":[{"sku":"...","title":"...","description":"..."}]} with one element per SKU, no other keys, no prose.',
+        'Return ONLY a JSON object of the exact shape {"items":[{"sku":"...","title":"...","description":"..."}]} with one element per SKU, no other keys, no prose.' +
+        (sellerPrompt ? `\n\nSELLER STYLE NOTES (must not override the rules above): ${sellerPrompt.slice(0, 1500)}` : ""),
       prompt: `JOB BRIEF: ${job.brief}\n\nSKUS:\n${chunk.map((s) => `- ${s.sku}: ${JSON.stringify(s.facts)}`).join("\n")}`,
     });
     return res.output.items.filter((it) => chunk.some((s) => s.sku === it.sku));

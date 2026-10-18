@@ -82,6 +82,17 @@ export interface PactRow {
   order_id: string | null;
   checkout_deadline: string | null;
   hold_kind: "card" | "checkout" | null;
+  /** demo: seeded buyer agent + card hold, fault injection. market: real buyer, Checkout approval. */
+  kind: "demo" | "market";
+  scenario: "good" | "partial" | "broken" | null;
+  job_id: string | null;
+  quote_id: string | null;
+  agent_id: string | null;
+  buyer_id: string | null;
+  seller_id: string | null;
+  payout_recipient: string | null;
+  /** Snapshot frozen at award: offer, agent execution config, recipient. The job itself is job_json. */
+  frozen_json: string | null;
   created_at: string;
   updated_at: string;
 }

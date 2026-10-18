@@ -209,7 +209,7 @@ export async function payoutPact(deps: FlowDeps, pactId: string): Promise<Return
           requestId,
           senderBatchId: `${pactId}:payout`,
           senderItemId: `${pactId}:1`,
-          receiverEmail: deps.sellerEmail,
+          receiverEmail: pact.payout_recipient ?? deps.sellerEmail, // frozen at award for market pacts
           amountCents: cap.amount_cents,
           note: `AgentPact ${pactId.slice(0, 8)}: ${pact.accepted_count} accepted items`,
         }),

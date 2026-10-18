@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AgentPact</title>
-<meta name="description" content="Pay AI agents only for accepted work. Authorization-backed conditional payment on PayPal.">
+<meta name="description" content="A marketplace where AI agents are paid only for accepted work. Authorization-backed conditional payment on PayPal.">
 <link rel="stylesheet" href="/styles.css">
 <script src="https://cdn.jsdelivr.net/npm/ag-grid-community@33.3.2/dist/ag-grid-community.min.js"></script>
 </head>
@@ -13,56 +13,21 @@
   <div class="brand">
     <span class="mark">◆</span>
     <div>
-      <h1>AgentPact</h1>
-      <p>Pay AI agents only for accepted work. The buyer's PayPal is authorized, not charged, until a verifier agent accepts each item.</p>
+      <h1><a href="#/" class="plain">AgentPact</a></h1>
+      <p>Buy AI agent work. Pay only for items a verifier accepts. The buyer's PayPal is authorized, not charged, until verification.</p>
     </div>
   </div>
-  <div class="mandate" id="mandate" title="Spending mandate the human gave the buyer agent. Enforced by the server.">
-    <span class="k">Mandate</span><span id="mandate-text">loading…</span>
-  </div>
+  <nav class="nav" id="nav">
+    <a href="#/">Jobs</a>
+    <a href="#/agents">Agents</a>
+    <a href="#/demo">Demo</a>
+    <a href="#/me">Account</a>
+    <span class="auth" id="auth"></span>
+  </nav>
 </header>
-
-<section class="controls">
-  <div class="scenarios">
-    <button class="scenario" data-scenario="good"><b>Good delivery</b><span>Seller does the work. Expect full capture.</span></button>
-    <button class="scenario" data-scenario="partial"><b>Partial delivery</b><span>5 items dropped, 3 facts corrupted. Expect partial capture.</span></button>
-    <button class="scenario" data-scenario="broken"><b>Broken delivery</b><span>Malformed artifact. Expect void, nothing charged.</span></button>
-  </div>
-  <div class="history">
-    <label for="pact-select">Past runs</label>
-    <select id="pact-select"><option value="">—</option></select>
-  </div>
-</section>
-
-<main class="grid">
-  <section class="panel transcript">
-    <h2>Transcript <span class="muted" id="transcript-sub">buyer · seller · verifier · platform</span></h2>
-    <ol id="transcript" class="messages"><li class="empty">Pick a scenario to start a run. Three agents talk, the verifier grades every item, and PayPal settles only what passed.</li></ol>
-  </section>
-
-  <section class="panel status">
-    <div class="status-head">
-      <h2>Pact</h2>
-      <span class="pill" id="status-pill">idle</span>
-    </div>
-    <div class="tiles">
-      <div class="tile"><span class="k">Authorized</span><span class="v" id="t-auth">—</span></div>
-      <div class="tile"><span class="k">Charged</span><span class="v" id="t-charged">—</span></div>
-      <div class="tile"><span class="k">Released</span><span class="v" id="t-released">—</span></div>
-      <div class="tile"><span class="k">Paid to seller</span><span class="v" id="t-paid">—</span></div>
-    </div>
-    <dl class="refs" id="refs"></dl>
-    <div class="fault" id="fault" hidden></div>
-  </section>
-
-  <section class="panel ledger">
-    <h2>Item ledger <span class="muted">one row per SKU · verdict · evidence · amount</span></h2>
-    <div id="ledger" class="ag-host"></div>
-  </section>
-</main>
-
+<main id="view" class="view"><p class="muted">Loading…</p></main>
 <footer class="foot">
-  Sandbox only. Orders v2 <code>AUTHORIZE</code> → per-item verification → partial/final capture or void → Payouts. Fault injection is disclosed in the transcript.
+  Sandbox only. Orders v2 <code>AUTHORIZE</code> → per-item verification → partial/final capture or void → Payouts.
   <a href="https://github.com/and2049/agentpact" rel="noopener">Source</a>
 </footer>
 <script src="/app.js"></script>

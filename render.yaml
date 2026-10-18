@@ -32,3 +32,7 @@ services:
         sync: false
       - key: AI_SDK_LOG_WARNINGS
         value: "false"
+      - key: DEV_LOGIN_PASSCODE
+        sync: false
+      - key: AGENT_KEY_SECRET
+        sync: false
