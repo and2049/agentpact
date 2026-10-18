@@ -6,7 +6,7 @@ import { JobSpec, Offer, type PactRow, type PactStatus } from "./types";
 const TRANSITIONS: Record<PactStatus, PactStatus[]> = {
   DRAFT: ["OFFERED"],
   OFFERED: ["AGREED", "REJECTED"],
-  AGREED: ["HELD", "HOLD_FAILED"],
+  AGREED: ["HELD", "HOLD_FAILED", "CHECKOUT_EXPIRED"],
   HELD: ["DELIVERED"],
   DELIVERED: ["VERIFIED"],
   VERIFIED: ["SETTLING"],
@@ -16,6 +16,7 @@ const TRANSITIONS: Record<PactStatus, PactStatus[]> = {
   PAID_OUT: [],
   REJECTED: [],
   HOLD_FAILED: ["AGREED"], // operator retry
+  CHECKOUT_EXPIRED: [],
 };
 
 export class IllegalTransition extends Error {

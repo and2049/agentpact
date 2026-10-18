@@ -60,7 +60,8 @@ export type PactStatus =
   | "SETTLEMENT_FAILED"
   | "PAID_OUT"
   | "REJECTED"
-  | "HOLD_FAILED";
+  | "HOLD_FAILED"
+  | "CHECKOUT_EXPIRED";
 
 export type SettlementKind = "full" | "partial" | "void";
 
@@ -78,6 +79,9 @@ export interface PactRow {
   charge_cents: number | null;
   settlement_kind: SettlementKind | null;
   reserved_cents: number;
+  order_id: string | null;
+  checkout_deadline: string | null;
+  hold_kind: "card" | "checkout" | null;
   created_at: string;
   updated_at: string;
 }

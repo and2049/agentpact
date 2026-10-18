@@ -115,11 +115,22 @@ CREATE TABLE IF NOT EXISTS webhook_events (
 );
 `;
 
+/** Additive migrations for databases created by earlier versions. */
+const MIGRATIONS: Array<{ table: string; column: string; ddl: string }> = [
+  { table: "pacts", column: "order_id", ddl: "ALTER TABLE pacts ADD COLUMN order_id TEXT" },
+  { table: "pacts", column: "checkout_deadline", ddl: "ALTER TABLE pacts ADD COLUMN checkout_deadline TEXT" },
+  { table: "pacts", column: "hold_kind", ddl: "ALTER TABLE pacts ADD COLUMN hold_kind TEXT" },
+];
+
 export function openDb(path = ":memory:"): Db {
   const db = new Database(path, { create: true });
   db.run("PRAGMA journal_mode = WAL");
   db.run("PRAGMA foreign_keys = ON");
   db.run(SCHEMA);
+  for (const m of MIGRATIONS) {
+    const cols = db.query<{ name: string }, [string]>("SELECT name FROM pragma_table_info(?)").all(m.table);
+    if (!cols.some((c) => c.name === m.column)) db.run(m.ddl);
+  }
   return db;
 }
 
