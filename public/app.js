@@ -26,17 +26,18 @@
   gridApi = agGrid.createGrid($("ledger"), {
     theme,
     columnDefs: [
-      { field: "sku", headerName: "SKU", width: 92, pinned: "left", cellStyle: { fontFamily: "ui-monospace, Menlo, monospace" } },
+      { field: "sku", headerName: "SKU", width: 96, minWidth: 96, pinned: "left", cellStyle: { fontFamily: "ui-monospace, Menlo, monospace" } },
       { field: "name", headerName: "Product", minWidth: 140, flex: 1 },
       {
         field: "verdict",
         width: 124,
+        minWidth: 124,
         cellRenderer: (p) => `<span class="verdict ${p.value}">${p.value}</span>`,
         filter: true,
       },
-      { field: "score", width: 84, valueFormatter: (p) => (p.value == null ? "" : p.value.toFixed(2)), type: "numericColumn" },
+      { field: "score", width: 84, minWidth: 84, valueFormatter: (p) => (p.value == null ? "" : p.value.toFixed(2)), type: "numericColumn" },
       { field: "reason", minWidth: 220, flex: 2, tooltipField: "evidence", wrapText: false },
-      { field: "amount", headerName: "Charge", width: 96, type: "numericColumn", valueFormatter: (p) => (p.value == null ? "" : cents(p.value)) },
+      { field: "amount", headerName: "Charge", width: 96, minWidth: 96, type: "numericColumn", valueFormatter: (p) => (p.value == null ? "" : cents(p.value)) },
     ],
     defaultColDef: { sortable: true, resizable: true },
     rowData: [],
@@ -44,7 +45,6 @@
     animateRows: true,
     tooltipShowDelay: 300,
     pinnedBottomRowData: [],
-    onGridReady: () => gridApi.sizeColumnsToFit(),
   });
 
   function resetGrid(skus) {
