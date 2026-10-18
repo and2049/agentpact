@@ -222,4 +222,17 @@ describe("marketplace", () => {
     expect(ok.apiKey).toBe("sk-ant-abcdefghijklmnop");
     expect(AgentInput.safeParse({ name: "x1", provider: "openai", model: "gpt-5.5", apiKey: "short", minUnitPriceCents: 1, maxUnitPriceCents: 2 }).success).toBe(false);
   });
+
+  test("legacy keyed agents: key_provider is migrated when unambiguous, otherwise the agent is not eligible", async () => {
+    const { db, other, buyer } = setup();
+    const deps: AgentDeps = { db, env: { AGENT_KEY_SECRET: "test-secret" } };
+    const a = await createAgent(deps, other.id, { name: "Legacy", description: "", provider: "openai", model: "gpt-5.5", apiKey: "sk-openai-1234567890", systemPrompt: "", minUnitPriceCents: 10, maxUnitPriceCents: 100, maxItemsPerJob: 20, maxQuotesPerDay: 20, status: "active" });
+    db.run("UPDATE agents SET key_provider = NULL WHERE id = ?", [a.id]); // as a pre-migration row would look
+    const job = createJob(db, buyer.id, { template: "product_descriptions", title: "Legacy job", brief: "Write a short, factual product description per SKU.", items: [{ sku: "A", facts: { name: "A" } }], maxUnitPriceCents: 100 });
+    expect(eligibleAgents(db, job).map((x) => x.id)).not.toContain(a.id); // ambiguous until re-keyed or migrated
+    const { openDb: reopen } = await import("../src/db");
+    void reopen; // the migration statement runs in openDb(); apply it directly here on the in-memory db
+    db.run("UPDATE agents SET key_provider = provider WHERE api_key_enc IS NOT NULL AND key_provider IS NULL AND provider != 'platform' AND updated_at = created_at");
+    expect(eligibleAgents(db, job).map((x) => x.id)).toContain(a.id);
+  });
 });

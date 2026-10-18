@@ -188,4 +188,31 @@ describe("checkout hold path", () => {
     expect(r.expired).toEqual([p.id]);
     expect(getMandate(db, m.id)!.reserved_cents).toBe(0);
   });
+
+  test("sweeper decisions use the pact as read inside the lock (an order created meanwhile is not expired)", async () => {
+    const { db, deps, p, m } = setup();
+    reserve(db, { mandateId: m.id, pactId: p.id, amountCents: 300, category: "product_descriptions", seller: SELLER });
+    db.run("UPDATE pacts SET kind = 'market', updated_at = '2026-01-01T00:00:00.000Z' WHERE id = ?", [p.id]);
+    // The lock is acquired after beginCheckout ran (simulating the approve/award route winning the lock first).
+    const r = await expireCheckouts(deps, { lock: async (_id, fn) => { await beginCheckout(deps, p.id); return fn(); } });
+    expect(r.expired).toEqual([]);
+    expect(getPact(db, p.id)!.status).toBe("AGREED");
+    expect(getPact(db, p.id)!.order_id).toMatch(/^O/);
+    expect(getMandate(db, m.id)!.reserved_cents).toBe(300);
+  });
+
+  test("an orphaned authorize op whose replay is denied closes the pact and reports it", async () => {
+    const { db, deps, p, m, pp } = setup();
+    const b = await beginCheckout(deps, p.id);
+    const orderId = b.ok ? b.pact.order_id! : "";
+    pp.approveOrder(orderId);
+    db.run("INSERT INTO payment_ops (op_id, pact_id, kind, request_id, status, attempts, created_at, updated_at) VALUES (?, ?, 'authorize_order', 'crash-req', 'pending', 1, '2026-01-01', '2026-01-01')", [`${p.id}:authorize`, p.id]);
+    pp.fault("authorizeOrder", { kind: "http", status: 422, body: { name: "UNPROCESSABLE_ENTITY", details: [{ issue: "PAYER_CANNOT_PAY" }] } });
+    const closed: string[] = [];
+    const r = await expireCheckouts(deps, { onClosed: (id) => closed.push(id) });
+    expect(r).toEqual({ expired: [], held: [] });
+    expect(closed).toEqual([p.id]);
+    expect(getPact(db, p.id)!.status).toBe("HOLD_FAILED");
+    expect(getMandate(db, m.id)!.reserved_cents).toBe(0);
+  });
 });

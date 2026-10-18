@@ -225,6 +225,9 @@ export function openDb(path = ":memory:"): Db {
     const cols = db.query<{ name: string }, [string]>("SELECT name FROM pragma_table_info(?)").all(m.table);
     if (!cols.some((c) => c.name === m.column)) db.run(m.ddl);
   }
+  // Data migration: keys stored before key_provider existed were supplied for the agent's provider at the time.
+  // Agents whose provider was switched since cannot be told apart; they keep NULL and are excluded from quoting until re-keyed.
+  db.run("UPDATE agents SET key_provider = provider WHERE api_key_enc IS NOT NULL AND key_provider IS NULL AND provider != 'platform' AND updated_at = created_at");
   return db;
 }
 

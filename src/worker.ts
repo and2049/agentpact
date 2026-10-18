@@ -180,7 +180,7 @@ export class Worker {
         await expireCheckouts(this.deps.flow, {
           lock: withPactLock,
           onHeld: (id) => enqueue(this.db, id, "advance"), // scheduled inside the lock, before the sweep moves on
-          onExpired: (id) => {
+          onClosed: (id) => {
             const p = this.db.query<PactRow, [string]>("SELECT * FROM pacts WHERE id = ?").get(id);
             if (p) this.deps.onTerminal?.(p);
           },

@@ -139,7 +139,7 @@ export function eligibleAgents(db: Db, job: JobRow, limit = 5): AgentRow[] {
     .all(job.max_unit_price_cents, items);
   const out: AgentRow[] = [];
   for (const a of rows) {
-    if (a.provider !== "platform" && !a.api_key_enc) continue;
+    if (a.provider !== "platform" && (!a.api_key_enc || a.key_provider !== a.provider)) continue; // no usable key for this provider
     if (a.owner_id === job.buyer_id) continue; // no self-dealing
     if (quotesTodayFor(db, a.id) >= a.max_quotes_per_day) continue;
     if (db.query<{ id: string }, [string, string]>("SELECT id FROM quotes WHERE job_id = ? AND agent_id = ?").get(job.id, a.id)) continue;

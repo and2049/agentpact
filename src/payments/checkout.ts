@@ -160,7 +160,8 @@ export interface SweepOptions {
   lock?: Lock;
   /** Called inside the pact lock as soon as a pact is promoted, so scheduling cannot be lost to a later failure. */
   onHeld?: (pactId: string) => void;
-  onExpired?: (pactId: string) => void;
+  /** Called inside the pact lock whenever the sweep closes a pact (CHECKOUT_EXPIRED, or HOLD_FAILED from a resumed op). */
+  onClosed?: (pactId: string) => void;
   inFlightMs?: number;
 }
 
@@ -180,11 +181,7 @@ export async function expireCheckouts(deps: FlowDeps, opts: SweepOptions = {}): 
   const lock = opts.lock ?? noLock;
   const inFlightMs = opts.inFlightMs ?? IN_FLIGHT_MS;
   const result: SweepResult = { expired: [], held: [] };
-  const rows = db
-    .query<{ id: string; order_id: string | null; mandate_id: string; checkout_deadline: string | null; kind: string; updated_at: string }, []>(
-      "SELECT id, order_id, mandate_id, checkout_deadline, kind, updated_at FROM pacts WHERE status = 'AGREED' AND (order_id IS NOT NULL OR kind = 'market')",
-    )
-    .all();
+  const ids = db.query<{ id: string }, []>("SELECT id FROM pacts WHERE status = 'AGREED' AND (order_id IS NOT NULL OR kind = 'market')").all().map((x) => x.id);
   const expire = (id: string, mandateId: string, payload: unknown) => {
     const tx = db.transaction(() => {
       const again = getPact(db, id);
@@ -195,13 +192,14 @@ export async function expireCheckouts(deps: FlowDeps, opts: SweepOptions = {}): 
     });
     if (tx()) {
       result.expired.push(id);
-      opts.onExpired?.(id);
+      opts.onClosed?.(id);
     }
   };
-  for (const r of rows) {
-    await lock(r.id, async () => {
-      const cur = getPact(db, r.id);
-      if (!cur || cur.status !== "AGREED") return;
+  for (const id of ids) {
+    await lock(id, async () => {
+      // Everything below reads the pact as it is *inside* the lock; the id list may be stale.
+      const r = getPact(db, id);
+      if (!r || r.status !== "AGREED") return;
       if (!r.order_id) {
         // Award committed but order creation never completed; the buyer can retry for one TTL.
         if (new Date(r.updated_at).getTime() + CHECKOUT_TTL_MS < new Date(at).getTime()) expire(r.id, r.mandate_id, { reason: "order never created" });
@@ -229,8 +227,13 @@ export async function expireCheckouts(deps: FlowDeps, opts: SweepOptions = {}): 
           opts.onHeld?.(r.id);
           return;
         }
+        if (resumed.pact && resumed.pact.status !== "AGREED") {
+          // HOLD_FAILED (denied / no authorization): the pact is closed and its job must be reopened.
+          opts.onClosed?.(r.id);
+          return;
+        }
         if (resumed.ok || resumed.code === "unknown") return;
-        // not_approved / failed: continue to the deadline check
+        // not_approved: continue to the deadline check
       }
       const past = Boolean(r.checkout_deadline && r.checkout_deadline < at);
       if (!past) return;
