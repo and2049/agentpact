@@ -16,18 +16,18 @@ declare global {
 interface PayPalSession { start: (o: { presentationMode: string }, order: Promise<{ orderId: string }>) => Promise<void> }
 interface PayPalSdk { createPayPalOneTimePaymentSession: (h: { onApprove: (d: { orderId: string }) => Promise<void>; onCancel: () => void; onError: (e: unknown) => void }) => PayPalSession }
 
-const SDK = "https://www.sandbox.paypal.com/web-sdk/v6/core"
+const sdkUrl = (env: string) => `https://www.${env === "live" ? "" : "sandbox."}paypal.com/web-sdk/v6/core`
 let sdkLoad: Promise<void> | null = null
-const loadSdk = () =>
+const loadSdk = (env: string) =>
   (sdkLoad ??= new Promise<void>((res, rej) => {
     const s = document.createElement("script")
-    s.src = SDK
+    s.src = sdkUrl(env)
     s.onload = () => res()
     s.onerror = () => { sdkLoad = null; rej(new Error("PayPal SDK failed to load")) }
     document.head.appendChild(s)
   }))
 
-export function PayPalApprove({ pactId, orderId, clientId, totalCents, deadline, onDone }: { pactId: string; orderId: string; clientId: string; totalCents: number; deadline: string | null; onDone: () => void }) {
+export function PayPalApprove({ pactId, orderId, clientId, env, totalCents, deadline, onDone }: { pactId: string; orderId: string; clientId: string; env: string; totalCents: number; deadline: string | null; onDone: () => void }) {
   const [log, setLog] = React.useState<string>("")
   const [ready, setReady] = React.useState(false)
   const btn = React.useRef<HTMLElement>(null)
@@ -37,7 +37,7 @@ export function PayPalApprove({ pactId, orderId, clientId, totalCents, deadline,
     let alive = true
     void (async () => {
       try {
-        await loadSdk()
+        await loadSdk(env)
         if (!alive || !window.paypal) return
         const sdk = await window.paypal.createInstance({ clientId, components: ["paypal-payments"], pageType: "checkout" })
         session.current = sdk.createPayPalOneTimePaymentSession({
@@ -60,7 +60,7 @@ export function PayPalApprove({ pactId, orderId, clientId, totalCents, deadline,
       }
     })()
     return () => { alive = false }
-  }, [clientId, pactId, onDone])
+  }, [clientId, env, pactId, onDone])
 
   React.useEffect(() => {
     const el = btn.current

@@ -40,9 +40,13 @@ export function JobCard({ job }: { job: JobSummary }) {
 export function AgentCard({ agent, actions, className }: { agent: Agent; actions?: React.ReactNode; className?: string }) {
   const s = agent.stats
   return (
-    <Card size="sm" className={className}>
+    <Card size="sm" className={cn("relative", className)}>
       <CardHeader>
-        <CardTitle>{agent.name}</CardTitle>
+        <CardTitle>
+          <Link to={`/agents/${agent.id}`} className="hover:underline">
+            {agent.name}
+          </Link>
+        </CardTitle>
         {agent.description && <CardDescription className="line-clamp-2">{agent.description}</CardDescription>}
         <CardAction>
           <StatusBadge status={agent.status} />

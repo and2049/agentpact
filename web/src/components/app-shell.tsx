@@ -4,37 +4,36 @@ import { Link, NavLink, Outlet, useNavigate } from "react-router-dom"
 
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
-import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
+import { Field, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
 import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select"
-import { Separator } from "@/components/ui/separator"
 import { Spinner } from "@/components/ui/spinner"
 import { Notice } from "@/components/primitives"
 import { api } from "@/lib/api"
 import { useSession } from "@/lib/session"
 
-const NAV: Array<{ to: string; label: string; end?: boolean }> = [
-  { to: "/", label: "Jobs", end: true },
-  { to: "/agents", label: "Agents" },
-  { to: "/samples", label: "Sample runs" },
-  { to: "/account", label: "Account" },
-]
+export interface ShellContext { openDevLogin: () => void }
 
 export function AppShell() {
-  const { me, config, logout } = useSession()
+  const { me, logout } = useSession()
   const navigate = useNavigate()
   const [devOpen, setDevOpen] = React.useState(false)
+  const nav: Array<{ to: string; label: string; end?: boolean }> = [
+    { to: "/jobs", label: "Jobs" },
+    { to: "/agents", label: "Agents", end: true },
+    ...(me ? [{ to: "/account", label: "Account" }] : []),
+    ...(me?.operator ? [{ to: "/ops", label: "Ops" }] : []),
+  ]
 
   return (
     <div className="flex min-h-svh flex-col">
       <header className="border-b bg-card">
-        <div className="mx-auto flex max-w-7xl items-center gap-6 px-4 py-3 md:px-6">
-          <Link to="/" className="flex items-baseline gap-2 font-heading text-lg font-semibold tracking-tight">
+        <div className="mx-auto flex max-w-7xl items-center gap-4 px-4 py-3 md:px-6">
+          <Link to="/" className="font-heading text-lg font-semibold tracking-tight">
             AgentPact
-            <span className="eyebrow hidden sm:inline">pay on acceptance</span>
           </Link>
           <nav className="ml-auto flex items-center gap-1 text-sm">
-            {NAV.map((n) => (
+            {nav.map((n) => (
               <NavLink
                 key={n.to}
                 to={n.to}
@@ -47,51 +46,45 @@ export function AppShell() {
               </NavLink>
             ))}
           </nav>
-          <Separator orientation="vertical" className="hidden h-5 sm:block" />
           <div className="flex items-center gap-2 text-sm">
+            <Button size="sm" render={<Link to="/post" />} nativeButton={false}>
+              Post a job
+            </Button>
             {me ? (
-              <>
-                <span className="hidden max-w-40 truncate text-muted-foreground md:inline" title={me.email}>
-                  {me.name}
-                </span>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={async () => {
-                    await logout()
-                    navigate("/")
-                  }}
-                >
-                  Log out
-                </Button>
-              </>
+              <Button
+                variant="ghost"
+                size="sm"
+                title={me.email}
+                onClick={async () => {
+                  await logout()
+                  navigate("/")
+                }}
+              >
+                Log out
+              </Button>
             ) : (
-              <>
-                <Button size="sm" render={<a href="/auth/paypal/start" />} nativeButton={false}>
-                  Log in with PayPal
-                </Button>
-                {config.devLogin && (
-                  <Button variant="ghost" size="sm" onClick={() => setDevOpen(true)}>
-                    Dev login
-                  </Button>
-                )}
-              </>
+              <Button variant="outline" size="sm" render={<a href="/auth/paypal/start" />} nativeButton={false}>
+                Log in
+              </Button>
             )}
           </div>
         </div>
       </header>
 
       <main className="mx-auto flex w-full max-w-7xl flex-1 flex-col gap-6 px-4 py-6 md:px-6">
-        <Outlet context={{ openDevLogin: () => setDevOpen(true) }} />
+        <Outlet context={{ openDevLogin: () => setDevOpen(true) } satisfies ShellContext} />
       </main>
 
       <footer className="border-t">
-        <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-x-4 gap-y-1 px-4 py-4 font-mono text-[11px] text-muted-foreground md:px-6">
-          <span>Sandbox only</span>
-          <span>Orders v2 AUTHORIZE → per-item verification → partial or final capture, or void → Payouts</span>
-          <a className="ml-auto underline underline-offset-4 hover:text-foreground" href="https://github.com/and2049/agentpact" rel="noopener">
-            Source
-          </a>
+        <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-x-5 gap-y-1 px-4 py-4 text-xs text-muted-foreground md:px-6">
+          <span>AgentPact</span>
+          <Link to="/how-it-works" className="hover:text-foreground">
+            How it works
+          </Link>
+          <Link to="/sell" className="hover:text-foreground">
+            For agent builders
+          </Link>
+          <span className="ml-auto">Payments by PayPal</span>
         </div>
       </footer>
 
@@ -102,6 +95,7 @@ export function AppShell() {
 
 function DevLoginDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o: boolean) => void }) {
   const { refresh } = useSession()
+  const navigate = useNavigate()
   const [who, setWho] = React.useState<"buyer" | "seller">("buyer")
   const [passcode, setPasscode] = React.useState("")
   const [busy, setBusy] = React.useState(false)
@@ -116,6 +110,7 @@ function DevLoginDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (
       await refresh()
       setPasscode("")
       onOpenChange(false)
+      navigate("/ops")
     } catch (e) {
       setError(e)
     } finally {
@@ -128,8 +123,8 @@ function DevLoginDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (
       <DialogContent>
         <form onSubmit={submit} className="flex flex-col gap-4">
           <DialogHeader>
-            <DialogTitle>Dev login</DialogTitle>
-            <DialogDescription>Sign in as one of the two seeded sandbox accounts. Needs the server's dev passcode.</DialogDescription>
+            <DialogTitle>Operator login</DialogTitle>
+            <DialogDescription>Sign in as one of the seeded accounts with the operator passcode.</DialogDescription>
           </DialogHeader>
           <FieldGroup>
             <Field>
@@ -142,7 +137,6 @@ function DevLoginDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (
             <Field>
               <FieldLabel htmlFor="dev-pass">Passcode</FieldLabel>
               <Input id="dev-pass" type="password" autoComplete="off" value={passcode} onChange={(e) => setPasscode(e.target.value)} required />
-              <FieldDescription>Set by DEV_LOGIN_PASSCODE on the server.</FieldDescription>
             </Field>
           </FieldGroup>
           <Notice error={error} />
@@ -162,34 +156,18 @@ function DevLoginDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (
 }
 
 /** Shown in place of a page that needs an account. */
-export function LoginPrompt({ what }: { what: string }) {
-  const { config } = useSession()
-  const ctx = useOutletContextSafe()
+export function LoginPrompt({ what, hint }: { what: string; hint?: string }) {
   return (
     <div className="mx-auto flex w-full max-w-md flex-col gap-4 rounded-xl bg-card p-6 ring-1 ring-foreground/10">
       <div className="flex flex-col gap-1">
         <h2 className="font-heading text-lg font-medium">Log in to {what}</h2>
-        <p className="text-sm text-muted-foreground">PayPal sandbox accounts only. Your PayPal email is where seller payouts go.</p>
+        <p className="text-sm text-muted-foreground">{hint ?? "Sign in with your PayPal account. It takes a few seconds and no password is shared with AgentPact."}</p>
       </div>
-      <div className="flex flex-wrap gap-2">
+      <div>
         <Button render={<a href="/auth/paypal/start" />} nativeButton={false}>
           Log in with PayPal
         </Button>
-        {config.devLogin && ctx && (
-          <Button variant="outline" onClick={ctx.openDevLogin}>
-            Dev login
-          </Button>
-        )}
       </div>
     </div>
   )
-}
-
-import { useOutletContext } from "react-router-dom"
-function useOutletContextSafe(): { openDevLogin: () => void } | null {
-  try {
-    return useOutletContext<{ openDevLogin: () => void }>() ?? null
-  } catch {
-    return null
-  }
 }

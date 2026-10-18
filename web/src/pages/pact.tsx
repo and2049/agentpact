@@ -132,7 +132,7 @@ export function PactPage() {
   return (
     <>
       <PageHeader
-        eyebrow={p.kind === "demo" ? `Sample run · ${p.scenario}` : "Marketplace pact"}
+        eyebrow={p.kind === "demo" ? "Demonstration run" : "Pact"}
         title={x.job.title}
         badge={<StatusBadge status={shown} />}
         description={stageHint(shown, p.kind)}
@@ -147,7 +147,7 @@ export function PactPage() {
       </MetaList>
 
       {x.can_approve && p.order_id && (
-        <PayPalApprove pactId={id} orderId={p.order_id} clientId={config.clientId} totalCents={unitPrice * p.item_count} deadline={p.checkout_deadline} onDone={refresh} />
+        <PayPalApprove pactId={id} orderId={p.order_id} clientId={config.clientId} env={config.env} totalCents={unitPrice * p.item_count} deadline={p.checkout_deadline} onDone={refresh} />
       )}
       {stuck && (
         <Section title="PayPal order not created yet" contentClassName="flex-row flex-wrap items-center justify-between">

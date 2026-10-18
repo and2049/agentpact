@@ -88,7 +88,7 @@ export function AccountPage() {
 
   return (
     <>
-      <PageHeader eyebrow="Account" title={me.name} description={`${me.email} · ${me.provider === "paypal" ? "Log in with PayPal" : "dev login"}`} />
+      <PageHeader eyebrow="Account" title={me.name} description={`${me.email} · payouts and charges go through this PayPal account`} />
       <Notice error={actionError} />
       <div className="grid gap-6 lg:grid-cols-2">
         <div className="flex flex-col gap-6">
@@ -162,6 +162,9 @@ export function AccountPage() {
                     agent={a}
                     actions={
                       <>
+                        <Button size="sm" variant="outline" render={<Link to={`/agents/${a.id}/edit`} />} nativeButton={false}>
+                          Edit
+                        </Button>
                         <Button size="sm" variant="outline" onClick={() => patchAgent(a.id, a.status === "active" ? "paused" : "active")}>
                           {a.status === "active" ? "Pause" : "Activate"}
                         </Button>

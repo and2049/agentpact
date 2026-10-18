@@ -126,6 +126,15 @@ function requireUser(c: Ctx): User {
   if (!u) throw bad(401, "login required", { login: "/auth/paypal/start" });
   return u;
 }
+/** Operators see the demo console: seeded dev accounts, plus the PayPal emails listed in OPERATOR_EMAILS. */
+const OPERATOR_EMAILS = new Set((env.OPERATOR_EMAILS ?? "").split(",").map((e) => e.trim().toLowerCase()).filter(Boolean));
+const isOperator = (u: User | null | undefined): boolean => Boolean(u && (u.provider === "dev" || OPERATOR_EMAILS.has(u.email.toLowerCase())));
+const withRole = (u: User) => ({ ...u, operator: isOperator(u) });
+function requireOperator(c: Ctx): User {
+  const u = requireUser(c);
+  if (!isOperator(u)) throw bad(403, "operators only");
+  return u;
+}
 function canSeePact(user: User | null, pact: PactRow): boolean {
   if (pact.kind === "demo") return true;
   return Boolean(user && (pact.buyer_id === user.id || pact.seller_id === user.id));
@@ -222,7 +231,7 @@ app.get("/auth/paypal/callback", async (c) => {
   const secure = publicOrigin(c).startsWith("https");
   c.header("Set-Cookie", cookieHeader(SESSION_COOKIE, session.id, { maxAge: SESSION_TTL_MS / 1000, secure }), { append: true });
   c.header("Set-Cookie", "lipp_state=; Path=/; Max-Age=0", { append: true });
-  return c.redirect("/account");
+  return c.redirect("/welcome");
 });
 
 /** Passcode-gated seeded accounts (fallback when Log in with PayPal is unavailable). */
@@ -238,7 +247,7 @@ app.post("/auth/dev", async (c) => {
 app.get("/me", (c) => {
   const user = currentUser(c);
   if (!user) return c.json({ user: null, login: "/auth/paypal/start" }, 401);
-  return c.json({ user });
+  return c.json({ user: withRole(user) });
 });
 
 app.post("/logout", (c) => {
@@ -255,7 +264,7 @@ app.get("/api/me", (c) => {
   const asSeller = db.query<PactRow, [string]>("SELECT * FROM pacts WHERE seller_id = ? AND kind = 'market' ORDER BY created_at DESC LIMIT 100").all(user.id);
   const earned = asSeller.filter((p) => p.status === "PAID_OUT").reduce((s, p) => s + (p.charge_cents ?? 0), 0);
   return c.json({
-    user,
+    user: withRole(user),
     mandate,
     jobs: listJobs(db, { buyerId: user.id }).map((j) => publicJob(db, j)),
     agents: listAgents(db, { ownerId: user.id }).map((a) => publicAgent(db, a, user.id)),
@@ -289,6 +298,13 @@ app.get("/api/agents/:id", (c) => {
   const a = getAgent(db, c.req.param("id"));
   if (!a) throw bad(404, "not found");
   return c.json(publicAgent(db, a, currentUser(c)?.id));
+});
+/** Public work history of an agent: settled marketplace pacts, titles and acceptance only. */
+app.get("/api/agents/:id/pacts", (c) => {
+  const a = getAgent(db, c.req.param("id"));
+  if (!a) throw bad(404, "not found");
+  const rows = db.query<PactRow, [string]>("SELECT * FROM pacts WHERE agent_id = ? AND status IN ('SETTLED','PAID_OUT') ORDER BY updated_at DESC LIMIT 20").all(a.id);
+  return c.json(rows.map((p) => ({ id: p.id, title: jobOf(p).title, item_count: p.item_count, accepted_count: p.accepted_count, unit_price_cents: p.unit_price_cents, settlement_kind: p.settlement_kind, updated_at: p.updated_at })));
 });
 app.patch("/api/agents/:id", async (c) => {
   const user = requireUser(c);
@@ -478,6 +494,7 @@ function activeDemoRun(): string | null {
   return row?.subject_id ?? null;
 }
 app.post("/api/demo/runs", async (c) => {
+  requireOperator(c);
   const b = await body(c, z.object({ scenario: z.enum(["good", "partial", "broken"]).default("good") }));
   const active = activeDemoRun();
   if (active) return c.json({ error: "a sample run is already in progress", pactId: active }, 409);
@@ -497,7 +514,10 @@ app.post("/api/demo/runs", async (c) => {
   return c.json({ pactId: pact.id, scenario: b.scenario }, 202);
 });
 app.post("/api/runs", (c) => c.redirect("/api/demo/runs", 307));
-app.get("/api/demo/active", (c) => c.json({ pactId: activeDemoRun() }));
+app.get("/api/demo/active", (c) => {
+  requireOperator(c);
+  return c.json({ pactId: activeDemoRun() });
+});
 
 // ---------- PayPal webhook receiver (rejects unverifiable events) ----------
 app.post("/api/paypal/webhook", async (c) => {

@@ -40,7 +40,7 @@ export type JobStatus = "OPEN" | "AWARDED" | "CLOSED"
 export type QuoteStatus = "pending" | "open" | "awarded" | "lost"
 export type Role = "buyer" | "seller" | "verifier" | "platform"
 
-export interface User { id: string; provider: "paypal" | "dev"; name: string; email: string }
+export interface User { id: string; provider: "paypal" | "dev"; name: string; email: string; operator?: boolean }
 export interface Config { clientId: string; env: string; devLogin: boolean; keyCustody: boolean; templates: Array<{ id: string; name: string; rubric: { minWords: number; maxWords: number; criteria?: string[] } }> }
 
 export type Facts = Record<string, string | number>
@@ -56,6 +56,7 @@ export interface Agent {
   min_unit_price_cents: number; max_unit_price_cents: number; max_items_per_job: number; status: "active" | "paused"
   created_at: string; stats: AgentStats; has_key?: boolean; system_prompt?: string; max_quotes_per_day?: number
 }
+export interface AgentWork { id: string; title: string; item_count: number; accepted_count: number | null; unit_price_cents: number | null; settlement_kind: string | null; updated_at: string }
 export interface Quote {
   id: string; job_id: string; agent_id: string; seller_id: string; status: QuoteStatus; unit_price_cents: number
   eta_minutes: number; message: string; created_at: string; agent: Agent | null; seller_name: string

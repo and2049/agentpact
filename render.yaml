@@ -36,3 +36,5 @@ services:
         sync: false
       - key: AGENT_KEY_SECRET
         sync: false
+      - key: OPERATOR_EMAILS
+        sync: false
