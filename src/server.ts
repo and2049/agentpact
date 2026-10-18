@@ -273,6 +273,12 @@ app.get("/api/me", (c) => {
   });
 });
 
+/** Market pacts waiting for this buyer's PayPal approval: a server-side filter, so no list limit can hide one. */
+app.get("/api/me/awaiting", (c) => {
+  const user = requireUser(c);
+  const rows = db.query<PactRow, [string]>("SELECT * FROM pacts WHERE kind = 'market' AND buyer_id = ? AND status = 'AGREED' ORDER BY created_at DESC LIMIT 20").all(user.id);
+  return c.json(rows.map((p) => ({ id: p.id, title: jobOf(p).title, order_id: p.order_id, checkout_deadline: p.checkout_deadline })));
+});
 app.put("/api/mandate", async (c) => {
   const user = requireUser(c);
   const b = await body(c, z.object({ maxPerPactCents: z.number().int().min(100).max(100_000), maxAggregateCents: z.number().int().min(100).max(1_000_000) }));

@@ -22,20 +22,24 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   const [awaiting, setAwaiting] = React.useState<Array<{ id: string; title: string }>>([])
 
   const meRef = React.useRef<User | null>(null)
+  // Generation counter: a response from an earlier session or an overlapping request never overwrites newer state.
+  const gen = React.useRef(0)
   const refreshAwaiting = React.useCallback(async () => {
     const user = meRef.current
+    const g = ++gen.current
     if (!user) return setAwaiting([])
     try {
-      const pacts = await api<Array<{ id: string; title: string; status: string; kind: string; buyer_id: string | null }>>("/api/pacts")
-      setAwaiting(pacts.filter((p) => p.kind === "market" && p.status === "AGREED" && p.buyer_id === user.id).map((p) => ({ id: p.id, title: p.title })))
+      const rows = await api<Array<{ id: string; title: string }>>("/api/me/awaiting")
+      if (g === gen.current && meRef.current?.id === user.id) setAwaiting(rows.map((p) => ({ id: p.id, title: p.title })))
     } catch {
-      setAwaiting([])
+      if (g === gen.current) setAwaiting([])
     }
   }, [])
 
   const refresh = React.useCallback(async () => {
     const r = await fetch("/me")
     const j = r.ok ? ((await r.json()) as { user: User | null }) : { user: null }
+    if (meRef.current?.id !== j.user?.id) { gen.current++; setAwaiting([]) }
     meRef.current = j.user
     setMe(j.user)
     void refreshAwaiting()
@@ -51,6 +55,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
 
   const logout = React.useCallback(async () => {
     await api("/logout", { method: "POST" })
+    gen.current++
     meRef.current = null
     setMe(null)
     setAwaiting([])

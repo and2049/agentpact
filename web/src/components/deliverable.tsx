@@ -43,7 +43,7 @@ export function Deliverable({ pactId, d }: { pactId: string; d: DeliverableShape
               <DownloadIcon data-icon="inline-start" />
               .csv
             </Button>
-            <Button size="sm" variant="outline" render={<a href={`/api/pacts/${pactId}/deliverable`} />} nativeButton={false}>
+            <Button size="sm" variant="outline" render={<a href={`/api/pacts/${pactId}/deliverable`} download={`agentpact-${pactId.slice(0, 8)}.json`} />} nativeButton={false}>
               <DownloadIcon data-icon="inline-start" />
               .json
             </Button>
