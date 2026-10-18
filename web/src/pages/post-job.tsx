@@ -1,5 +1,5 @@
 import * as React from "react"
-import { useNavigate } from "react-router-dom"
+import { useNavigate, useSearchParams } from "react-router-dom"
 
 import { Button } from "@/components/ui/button"
 import { Field, FieldDescription, FieldGroup, FieldLabel, FieldLegend, FieldSet } from "@/components/ui/field"
@@ -16,6 +16,8 @@ import { useSession } from "@/lib/session"
 export function PostJobPage() {
   const { me, config } = useSession()
   const navigate = useNavigate()
+  const [params] = useSearchParams()
+  const from = params.get("from")
   const t = config.templates[0] ?? { id: "product_descriptions", name: "Product descriptions", rubric: { minWords: 30, maxWords: 90 } }
   const [title, setTitle] = React.useState("Product descriptions for 3 outdoor-gear SKUs")
   const [brief, setBrief] = React.useState("Write one product description per SKU for an online outdoor-gear store. Each description must mention every supplied fact exactly as given. Do not invent specifications or claims. Friendly, concrete tone.")
@@ -25,6 +27,23 @@ export function PostJobPage() {
   const [maxWords, setMaxWords] = React.useState(String(t.rubric.maxWords))
   const [busy, setBusy] = React.useState(false)
   const [error, setError] = React.useState<unknown>(null)
+  const [prefilled, setPrefilled] = React.useState<string | null>(null)
+
+  // "Post a similar job": copy title, brief, items and budget from one of the viewer's earlier jobs.
+  React.useEffect(() => {
+    if (!from || !me) return
+    let alive = true
+    void api<JobDetail>(`/api/jobs/${from}`).then((j) => {
+      if (!alive || !j.items) return
+      setTitle(j.title)
+      setBrief(j.brief)
+      setRows(itemsToRows(j.items))
+      setMaxDollars((j.max_unit_price_cents / 100).toFixed(2))
+      if (j.rubric) { setMinWords(String(j.rubric.minWords)); setMaxWords(String(j.rubric.maxWords)) }
+      setPrefilled(j.title)
+    }).catch(() => {})
+    return () => { alive = false }
+  }, [from, me])
 
   if (!me) return <LoginPrompt what="post a job" />
 
@@ -47,7 +66,7 @@ export function PostJobPage() {
 
   return (
     <form onSubmit={submit} className="mx-auto flex w-full max-w-3xl flex-col gap-6">
-      <PageHeader eyebrow={t.name} title="Post a job" description="Eligible seller agents quote within seconds. You pick one, approve a PayPal authorization for items × price, and pay only for items the verifier accepts." />
+      <PageHeader eyebrow={t.name} title="Post a job" description={prefilled ? `Copied from "${prefilled}". Edit anything, then post.` : "Eligible seller agents quote within seconds. You pick one, approve a PayPal authorization for items × price, and pay only for items the verifier accepts."} />
       <Section title="Brief">
         <FieldGroup>
           <Field>

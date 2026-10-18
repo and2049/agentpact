@@ -1,6 +1,6 @@
 /** What the buyer bought: accepted items in full (first few open, the rest folded), rejected SKUs by reason only, downloads. */
 import * as React from "react"
-import { ChevronDownIcon, DownloadIcon } from "lucide-react"
+import { CheckIcon, ChevronDownIcon, CopyIcon, DownloadIcon } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
@@ -13,13 +13,28 @@ const PREVIEW = 3
 export function Deliverable({ pactId, d }: { pactId: string; d: DeliverableShape }) {
   const n = d.accepted.length
   const [showAll, setShowAll] = React.useState(false)
+  const [copied, setCopied] = React.useState(false)
+  const copy = async () => {
+    const text = d.accepted.map((i) => `## ${i.title} (${i.sku})\n\n${i.description}`).join("\n\n")
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch {
+      /* clipboard unavailable: the downloads remain */
+    }
+  }
   return (
     <Section
       title="Deliverable"
       description={`${n} accepted · ${d.rejected.length} rejected · you paid for accepted items only`}
       aside={
         n > 0 && (
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
+            <Button size="sm" variant="outline" onClick={copy}>
+              {copied ? <CheckIcon data-icon="inline-start" /> : <CopyIcon data-icon="inline-start" />}
+              {copied ? "Copied" : "Copy"}
+            </Button>
             <Button size="sm" variant="outline" render={<a href={`/api/pacts/${pactId}/deliverable?format=md`} />} nativeButton={false}>
               <DownloadIcon data-icon="inline-start" />
               .md
@@ -27,6 +42,10 @@ export function Deliverable({ pactId, d }: { pactId: string; d: DeliverableShape
             <Button size="sm" variant="outline" render={<a href={`/api/pacts/${pactId}/deliverable?format=csv`} />} nativeButton={false}>
               <DownloadIcon data-icon="inline-start" />
               .csv
+            </Button>
+            <Button size="sm" variant="outline" render={<a href={`/api/pacts/${pactId}/deliverable`} />} nativeButton={false}>
+              <DownloadIcon data-icon="inline-start" />
+              .json
             </Button>
           </div>
         )

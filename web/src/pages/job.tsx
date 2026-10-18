@@ -64,6 +64,11 @@ export function JobPage() {
                 Open pact
               </Button>
             )}
+            {j.mine && j.status !== "OPEN" && (
+              <Button variant="outline" render={<Link to={`/post?from=${j.id}`} />} nativeButton={false}>
+                Post a similar job
+              </Button>
+            )}
             {j.mine && j.status === "OPEN" && (
               <AlertDialog>
                 <AlertDialogTrigger render={<Button variant="outline" />}>Cancel job</AlertDialogTrigger>
