@@ -157,3 +157,7 @@ a.card:hover { border-color: var(--accent); }
 .approve { display: grid; grid-template-columns: 1fr minmax(240px, 320px); gap: 16px; align-items: center; border-color: var(--accent); }
 @media (max-width: 700px) { .approve { grid-template-columns: 1fr; } }
 paypal-button { display: block; }
+.item { border-top: 1px solid var(--line); padding: 8px 0; }
+.item h3 { margin: 0 0 4px; }
+.item p { margin: 0; }
+details { margin-top: 10px; }

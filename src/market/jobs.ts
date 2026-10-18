@@ -76,9 +76,19 @@ export class JobError extends Error {
   }
 }
 
-export function createJob(db: Db, buyerId: string, input: JobInput): JobRow {
+/** Abuse limits: quoting spends model budget, so posting is capped per account. */
+export const JOB_LIMITS = { perDay: 10, open: 5 };
+
+export function createJob(db: Db, buyerId: string, input: JobInput, opts: { enforceLimits?: boolean } = {}): JobRow {
   const skus = new Set(input.items.map((i) => i.sku));
   if (skus.size !== input.items.length) throw new JobError("invalid", "duplicate SKUs");
+  if (opts.enforceLimits) {
+    const since = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+    const today = db.query<{ n: number }, [string, string]>("SELECT count(*) AS n FROM jobs WHERE buyer_id = ? AND created_at > ?").get(buyerId, since)!.n;
+    if (today >= JOB_LIMITS.perDay) throw new JobError("invalid", `at most ${JOB_LIMITS.perDay} jobs per day`);
+    const open = db.query<{ n: number }, [string]>("SELECT count(*) AS n FROM jobs WHERE buyer_id = ? AND status = 'OPEN'").get(buyerId)!.n;
+    if (open >= JOB_LIMITS.open) throw new JobError("invalid", `at most ${JOB_LIMITS.open} open jobs at a time; award or cancel one first`);
+  }
   const t = TEMPLATES[input.template];
   const rubric = { ...t.rubric, minWords: input.minWords ?? t.rubric.minWords, maxWords: input.maxWords ?? t.rubric.maxWords };
   if (rubric.minWords > rubric.maxWords) throw new JobError("invalid", "minWords must be <= maxWords");
@@ -253,12 +263,44 @@ export async function awardJob(deps: { db: Db; flow: FlowDeps }, args: { jobId: 
   return { pact: checkout.pact ?? pact, checkout };
 }
 
-/** When a market pact ends without work (hold failed / checkout expired), reopen its job so the buyer can try again. */
+/**
+ * Job lifecycle after its pact ends: no work happened (hold failed / checkout expired) -> reopen so the
+ * buyer can try again; work settled (paid out, or voided) -> CLOSED.
+ */
 export function reopenJobFor(db: Db, pact: PactRow) {
-  if (pact.kind !== "market" || !pact.job_id) return;
-  if (pact.status !== "HOLD_FAILED" && pact.status !== "CHECKOUT_EXPIRED") return;
-  db.run("UPDATE jobs SET status = 'OPEN', pact_id = NULL, updated_at = ? WHERE id = ? AND pact_id = ?", [now(), pact.job_id, pact.id]);
-  db.run("UPDATE quotes SET status = 'open' WHERE job_id = ? AND status IN ('awarded', 'lost')", [pact.job_id]);
+  if (!pact.job_id) return;
+  if (pact.status === "HOLD_FAILED" || pact.status === "CHECKOUT_EXPIRED") {
+    if (pact.kind !== "market") return;
+    db.run("UPDATE jobs SET status = 'OPEN', pact_id = NULL, updated_at = ? WHERE id = ? AND pact_id = ?", [now(), pact.job_id, pact.id]);
+    db.run("UPDATE quotes SET status = 'open' WHERE job_id = ? AND status IN ('awarded', 'lost')", [pact.job_id]);
+    return;
+  }
+  if (pact.status === "PAID_OUT" || (pact.status === "SETTLED" && pact.settlement_kind === "void") || pact.status === "REJECTED") {
+    db.run("UPDATE jobs SET status = 'CLOSED', updated_at = ? WHERE id = ? AND pact_id = ? AND status = 'AWARDED'", [now(), pact.job_id, pact.id]);
+  }
+}
+export const closeJobFor = reopenJobFor;
+
+/** Buyer withdraws an open job. Quotes are marked lost; nothing was reserved yet. */
+export function cancelJob(db: Db, buyerId: string, jobId: string): JobRow {
+  const job = getJob(db, jobId);
+  if (!job) throw new JobError("not_found", "job not found");
+  if (job.buyer_id !== buyerId) throw new JobError("forbidden", "not your job");
+  if (job.status !== "OPEN") throw new JobError("state", `job is ${job.status}`);
+  db.run("UPDATE jobs SET status = 'CLOSED', updated_at = ? WHERE id = ? AND status = 'OPEN'", [now(), jobId]);
+  db.run("UPDATE quotes SET status = 'lost' WHERE job_id = ? AND status IN ('open', 'pending')", [jobId]);
+  return getJob(db, jobId)!;
+}
+
+/** What the buyer bought: accepted items with their text; rejected ones with the verifier's reason. Owner-only at the route. */
+export function deliverableFor(db: Db, pact: PactRow): { accepted: Array<{ sku: string; title: string; description: string }>; rejected: Array<{ sku: string; reason: string }>; status: PactRow["status"]; settled: boolean } {
+  const art = db.query<{ body_json: string }, [string]>("SELECT body_json FROM artifacts WHERE pact_id = ?").get(pact.id);
+  const items: Array<{ sku: string; title: string; description: string }> = art ? (JSON.parse(art.body_json) as unknown[]).filter((x): x is { sku: string; title: string; description: string } => Boolean(x && typeof x === "object" && "sku" in x)) : [];
+  const verdicts = db.query<{ sku: string; verdict: string; reason: string }, [string]>("SELECT sku, verdict, reason FROM item_verdicts WHERE pact_id = ?").all(pact.id);
+  const settled = pact.status === "SETTLED" || pact.status === "PAID_OUT";
+  const accepted = settled ? verdicts.filter((v) => v.verdict === "accepted").map((v) => items.find((i) => i.sku === v.sku)).filter((i): i is { sku: string; title: string; description: string } => Boolean(i)) : [];
+  const rejected = verdicts.filter((v) => v.verdict === "rejected").map((v) => ({ sku: v.sku, reason: v.reason }));
+  return { accepted, rejected, status: pact.status, settled };
 }
 
 /** Public job-board view: no items, no quotes. */

@@ -14,7 +14,7 @@ const Quote = z.object({
 export type Quote = z.infer<typeof Quote>;
 
 /** Seller agent: quote a job. Knows the buyer's stated max unit price. */
-export async function quoteJob(job: JobSpec, slot: ModelSlot): Promise<Quote> {
+export async function quoteJob(job: JobSpec, slot: ModelSlot, opts: { sellerPrompt?: string; band?: { min: number; max: number }; agentName?: string } = {}): Promise<Quote> {
   return withFallback(slot, async (model) => {
     const res = await generateText({
       model,
@@ -22,9 +22,11 @@ export async function quoteJob(job: JobSpec, slot: ModelSlot): Promise<Quote> {
       temperature: 0.3,
       maxOutputTokens: 400,
       system:
-        "You are a freelance copywriting agent negotiating a fixed-price job. Quote a unit price per SKU in USD cents and an ETA. " +
+        `You are ${opts.agentName ? `"${opts.agentName}", ` : ""}a freelance copywriting agent negotiating a fixed-price job. Quote a unit price per SKU in USD cents and an ETA. ` +
         "The buyer pays only for items that pass verification, so quote within the buyer's stated maximum unless the job is unreasonable. " +
-        'Respond ONLY with JSON of the exact shape {"unitPriceCents":<int>,"etaMinutes":<int>,"message":"..."}.',
+        (opts.band ? `Your price band is ${opts.band.min}-${opts.band.max} cents per item; quote inside it. ` : "") +
+        (opts.sellerPrompt ? `Your style: ${opts.sellerPrompt.slice(0, 300)} ` : "") +
+        'Write the message in one or two sentences to the buyer, in your own voice, without restating the brief. Respond ONLY with JSON of the exact shape {"unitPriceCents":<int>,"etaMinutes":<int>,"message":"..."}.',
       prompt: `JOB: ${job.title}
 BRIEF: ${job.brief}
 ITEMS: ${job.skus.length}

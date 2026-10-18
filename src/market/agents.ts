@@ -81,10 +81,25 @@ export interface AgentDeps {
 
 const secretOf = (env: Record<string, string | undefined>) => env.AGENT_KEY_SECRET ?? "";
 
-export async function createAgent(deps: AgentDeps, ownerId: string, input: AgentInput): Promise<AgentRow> {
+/**
+ * Platform-hosted agents run on the platform's own model key, so anyone can play seller without
+ * bringing a key. They are capped: few per user, small jobs, few quotes a day. BYO-key agents are not.
+ */
+export const PLATFORM_AGENT_LIMITS = { perUser: 2, maxItemsPerJob: 10, maxQuotesPerDay: 10 };
+
+function applyPlatformLimits(input: AgentInput): AgentInput {
+  if (input.provider !== "platform") return input;
+  return { ...input, maxItemsPerJob: Math.min(input.maxItemsPerJob, PLATFORM_AGENT_LIMITS.maxItemsPerJob), maxQuotesPerDay: Math.min(input.maxQuotesPerDay, PLATFORM_AGENT_LIMITS.maxQuotesPerDay) };
+}
+
+export async function createAgent(deps: AgentDeps, ownerId: string, raw: AgentInput): Promise<AgentRow> {
   const { db } = deps;
+  const input = applyPlatformLimits(raw);
   if (input.provider !== "platform" && !input.apiKey) throw new AgentError("invalid", "apiKey is required for a keyed provider");
-  if (input.provider === "platform" && ownerIsNotPlatform(deps, ownerId)) throw new AgentError("forbidden", "the platform provider is reserved for seeded agents; bring your own key");
+  if (input.provider === "platform") {
+    const n = db.query<{ n: number }, [string]>("SELECT count(*) AS n FROM agents WHERE owner_id = ? AND provider = 'platform'").get(ownerId)!.n;
+    if (n >= PLATFORM_AGENT_LIMITS.perUser && !isSeedOwner(deps, ownerId)) throw new AgentError("invalid", `at most ${PLATFORM_AGENT_LIMITS.perUser} platform-hosted agents per account; bring your own key for more`);
+  }
   const enc = input.apiKey ? await seal(input.apiKey, secretOrThrow(deps)) : null;
   const id = crypto.randomUUID();
   const ts = now();
@@ -102,10 +117,10 @@ function secretOrThrow(deps: AgentDeps): string {
   return s;
 }
 
-/** Only seeded (dev-provider) accounts may create agents that run on the platform's key. */
-function ownerIsNotPlatform(deps: AgentDeps, ownerId: string): boolean {
+/** The seeded demo seller (dev provider) is exempt from the per-user platform-agent cap. */
+function isSeedOwner(deps: AgentDeps, ownerId: string): boolean {
   const u = deps.db.query<{ provider: string }, [string]>("SELECT provider FROM users WHERE id = ?").get(ownerId);
-  return u?.provider !== "dev";
+  return u?.provider === "dev";
 }
 
 export async function updateAgent(deps: AgentDeps, ownerId: string, id: string, patch: AgentPatch): Promise<AgentRow> {
@@ -113,7 +128,7 @@ export async function updateAgent(deps: AgentDeps, ownerId: string, id: string, 
   const cur = getAgent(db, id);
   if (!cur) throw new AgentError("not_found", "agent not found");
   if (cur.owner_id !== ownerId) throw new AgentError("forbidden", "not your agent");
-  const merged = AgentInput.parse({
+  const merged = applyPlatformLimits(AgentInput.parse({
     name: patch.name ?? cur.name,
     description: patch.description ?? cur.description,
     provider: patch.provider ?? cur.provider,
@@ -125,8 +140,11 @@ export async function updateAgent(deps: AgentDeps, ownerId: string, id: string, 
     maxItemsPerJob: patch.maxItemsPerJob ?? cur.max_items_per_job,
     maxQuotesPerDay: patch.maxQuotesPerDay ?? cur.max_quotes_per_day,
     status: patch.status ?? cur.status,
-  });
-  if (merged.provider === "platform" && cur.provider !== "platform" && ownerIsNotPlatform(deps, ownerId)) throw new AgentError("forbidden", "the platform provider is reserved for seeded agents");
+  }));
+  if (merged.provider === "platform" && cur.provider !== "platform") {
+    const n = db.query<{ n: number }, [string]>("SELECT count(*) AS n FROM agents WHERE owner_id = ? AND provider = 'platform'").get(ownerId)!.n;
+    if (n >= PLATFORM_AGENT_LIMITS.perUser && !isSeedOwner(deps, ownerId)) throw new AgentError("invalid", `at most ${PLATFORM_AGENT_LIMITS.perUser} platform-hosted agents per account`);
+  }
   const enc = merged.apiKey ? await seal(merged.apiKey, secretOrThrow(deps)) : cur.api_key_enc;
   const keyProvider: AgentProvider | null = merged.apiKey ? merged.provider : cur.key_provider;
   if (merged.provider !== "platform" && !enc) throw new AgentError("invalid", "apiKey is required for a keyed provider");
@@ -230,16 +248,51 @@ export function quotesTodayFor(db: Db, agentId: string): number {
   return db.query<{ n: number }, [string, string]>("SELECT count(*) AS n FROM quotes WHERE agent_id = ? AND created_at > ?").get(agentId, since)!.n;
 }
 
-/** Idempotent seeded demo agent for the dev seller account. */
+/** Seeded platform agents for the demo seller: three personas with different price bands so quotes compete. */
+export const SEED_AGENTS: Array<Pick<AgentRow, "name" | "description" | "system_prompt" | "min_unit_price_cents" | "max_unit_price_cents">> = [
+  {
+    name: "Copywriter One",
+    description: "Balanced store copy. Mentions every fact, keeps to the brief, mid-range price.",
+    system_prompt: "Friendly, concrete, no hype. Lead with what the product is for, then the facts.",
+    min_unit_price_cents: 50,
+    max_unit_price_cents: 200,
+  },
+  {
+    name: "Budget Scribe",
+    description: "Fast and cheap. Terse descriptions that cover the facts and little else.",
+    system_prompt: "Be brief and plain. Short sentences. Cover each fact once; no flourishes.",
+    min_unit_price_cents: 30,
+    max_unit_price_cents: 90,
+  },
+  {
+    name: "Boutique Voice",
+    description: "Premium tone for lifestyle brands. Slower, pricier, more evocative, still fact-exact.",
+    system_prompt: "Evocative, sensory, editorial tone as in a design magazine, but never add a feature, material, number or claim that is not in the facts.",
+    min_unit_price_cents: 120,
+    max_unit_price_cents: 300,
+  },
+];
+
+/** Idempotent (by name) seeded agents for the demo seller account. Returns the first one. */
 export function ensureSeedAgent(db: Db, ownerId: string): AgentRow {
-  const existing = db.query<AgentRow, [string]>("SELECT * FROM agents WHERE owner_id = ? AND provider = 'platform' ORDER BY created_at LIMIT 1").get(ownerId);
-  if (existing) return existing;
-  const id = crypto.randomUUID();
-  const ts = now();
-  db.run(
-    `INSERT INTO agents (id, owner_id, name, description, provider, model, api_key_enc, system_prompt, min_unit_price_cents, max_unit_price_cents, max_items_per_job, max_quotes_per_day, status, created_at, updated_at)
-     VALUES (?, ?, 'Copywriter One', 'Seeded demo seller: product descriptions on the platform model. Paid per accepted item.', 'platform', '', NULL, '', 50, 200, 20, 100, 'active', ?, ?)`,
-    [id, ownerId, ts, ts],
-  );
-  return getAgent(db, id)!;
+  let first: AgentRow | null = null;
+  for (const seed of SEED_AGENTS) {
+    const existing = db.query<AgentRow, [string, string]>("SELECT * FROM agents WHERE owner_id = ? AND name = ?").get(ownerId, seed.name);
+    let row = existing;
+    if (!row) {
+      const id = crypto.randomUUID();
+      const ts = now();
+      db.run(
+        `INSERT INTO agents (id, owner_id, name, description, provider, model, api_key_enc, system_prompt, min_unit_price_cents, max_unit_price_cents, max_items_per_job, max_quotes_per_day, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 'platform', '', NULL, ?, ?, ?, 20, 100, 'active', ?, ?)`,
+        [id, ownerId, seed.name, seed.description, seed.system_prompt, seed.min_unit_price_cents, seed.max_unit_price_cents, ts, ts],
+      );
+      row = getAgent(db, id)!;
+    } else if (existing && existing.description !== seed.description) {
+      db.run("UPDATE agents SET description = ?, system_prompt = ?, updated_at = ? WHERE id = ?", [seed.description, seed.system_prompt, now(), existing.id]);
+      row = getAgent(db, existing.id)!;
+    }
+    first ??= row;
+  }
+  return first!;
 }

@@ -4,9 +4,11 @@ import { openDb } from "../src/db";
 import { getMandate } from "../src/mandate";
 import { AgentInput, AgentPatch, createAgent, ensureSeedAgent, llmConfigForAgent, modelAllowed, publicAgent, updateAgent, type AgentDeps } from "../src/market/agents";
 import { redactedError, redactSecrets } from "../src/redact";
-import { awardJob, canSeeJobDetails, createJob, eligibleAgents, getJob, listQuotes, mandateForBuyer, recordQuote, reopenJobFor, reserveQuoteSlots } from "../src/market/jobs";
+import { awardJob, cancelJob, canSeeJobDetails, createJob, deliverableFor, eligibleAgents, getJob, JOB_LIMITS, listQuotes, mandateForBuyer, recordQuote, reopenJobFor, reserveQuoteSlots } from "../src/market/jobs";
 import { getPact } from "../src/pact/machine";
 import { completeCheckout, expireCheckouts } from "../src/payments/checkout";
+import { settlePact } from "../src/payments/flow";
+import { transition } from "../src/pact/machine";
 import type { FlowDeps } from "../src/payments/flow";
 import { FakePayPal } from "./fake-paypal";
 import { TEST_CARD } from "./fixtures";
@@ -32,10 +34,11 @@ function setup() {
 describe("marketplace", () => {
   test("eligible agents respect band, size, self-dealing and daily limits; quotes are clamped", () => {
     const { db, buyer, seller, agent, job } = setup();
-    expect(eligibleAgents(db, job).map((a) => a.id)).toEqual([agent.id]);
+    expect(eligibleAgents(db, job).map((a) => a.id)).toContain(agent.id);
+    expect(eligibleAgents(db, job)).toHaveLength(3); // the three seeded personas
     const q = recordQuote(db, job, agent, { unitPriceCents: 999, etaMinutes: 3, message: "hi" });
     expect(q.unit_price_cents).toBe(150); // clamped to the job max (agent band 50..200)
-    expect(eligibleAgents(db, job)).toEqual([]); // already quoted
+    expect(eligibleAgents(db, job).map((a) => a.id)).not.toContain(agent.id); // already quoted
     const low = createJob(db, buyer.id, { template: "product_descriptions", title: "Cheap job", brief: "Write a short, factual product description per SKU.", items: [{ sku: "A", facts: { name: "A" } }], maxUnitPriceCents: 10 });
     expect(eligibleAgents(db, low)).toEqual([]); // below the agent's minimum
     const own = createJob(db, seller.id, { template: "product_descriptions", title: "Seller's own job", brief: "Write a short, factual product description per SKU.", items: [{ sku: "A", facts: { name: "A" } }], maxUnitPriceCents: 100 });
@@ -126,7 +129,12 @@ describe("marketplace", () => {
     expect(JSON.stringify(pub)).not.toContain("sk-test");
     expect(pub.has_key).toBe(true);
     expect("has_key" in (publicAgent(db, a, seller.id) as Record<string, unknown>)).toBe(false);
-    await expect(createAgent(deps, other.id, { name: "Free ride", description: "", provider: "platform", model: "", systemPrompt: "", minUnitPriceCents: 10, maxUnitPriceCents: 100, maxItemsPerJob: 20, maxQuotesPerDay: 20, status: "active" })).rejects.toThrow(/reserved/);
+    // platform-hosted agents: anyone, capped per user and in size
+    const p1 = await createAgent(deps, other.id, { name: "Hosted one", description: "", provider: "platform", model: "", systemPrompt: "", minUnitPriceCents: 10, maxUnitPriceCents: 100, maxItemsPerJob: 20, maxQuotesPerDay: 50, status: "active" });
+    expect(p1.max_items_per_job).toBe(10);
+    expect(p1.max_quotes_per_day).toBe(10);
+    await createAgent(deps, other.id, { name: "Hosted two", description: "", provider: "platform", model: "", systemPrompt: "", minUnitPriceCents: 10, maxUnitPriceCents: 100, maxItemsPerJob: 5, maxQuotesPerDay: 5, status: "active" });
+    await expect(createAgent(deps, other.id, { name: "Hosted three", description: "", provider: "platform", model: "", systemPrompt: "", minUnitPriceCents: 10, maxUnitPriceCents: 100, maxItemsPerJob: 5, maxQuotesPerDay: 5, status: "active" })).rejects.toThrow(/at most 2/);
   });
 
   test("award resume: order creation timed out -> second award call retries with the same op and does not create a second pact", async () => {
@@ -150,15 +158,18 @@ describe("marketplace", () => {
   test("quote slots are persisted before quoting and a resumed run fills only those", () => {
     const { db, seller, agent, job } = setup();
     const first = reserveQuoteSlots(db, job);
-    expect(first.map((a) => a.id)).toEqual([agent.id]);
-    expect(listQuotes(db, job.id)[0]!.status).toBe("pending");
-    // another agent becomes eligible after the selection was made
-    ensureSeedAgent(db, seller.id); // same owner, already exists -> returns the same row
+    expect(first.map((a) => a.id)).toContain(agent.id);
+    expect(first).toHaveLength(3);
+    expect(listQuotes(db, job.id).every((q) => q.status === "pending")).toBe(true);
+    // another agent becomes eligible after the selection was made: not added to this job's selection
+    const extra = ensureSeedAgent(db, upsertUser(db, { provider: "paypal", providerUserId: "late", name: "Late", email: "late@sb" }).id);
     const again = reserveQuoteSlots(db, job);
-    expect(again.map((a) => a.id)).toEqual([agent.id]);
+    expect(again.map((a) => a.id).sort()).toEqual(first.map((a) => a.id).sort());
+    expect(again.map((a) => a.id)).not.toContain(extra.id);
     const filled = recordQuote(db, job, agent, { unitPriceCents: 100, etaMinutes: 3, message: "ok" });
     expect(filled.status).toBe("open");
-    expect(reserveQuoteSlots(db, job)).toEqual([]);
+    expect(reserveQuoteSlots(db, job).map((a) => a.id)).not.toContain(agent.id);
+    expect(reserveQuoteSlots(db, job)).toHaveLength(2);
   });
 
   test("agent PATCH schema accepts partial bodies and validates the merged agent; model allowlist", async () => {
@@ -194,18 +205,18 @@ describe("marketplace", () => {
 
   test("pending quote slots are never awardable and survive award/reopen untouched", async () => {
     const { db, buyer, other, agent, flow, job } = setup();
-    const agent2 = ensureSeedAgent(db, other.id);
-    reserveQuoteSlots(db, job); // agent + agent2 pending
+    void other;
+    reserveQuoteSlots(db, job); // the three seeded personas, all pending
     const q1 = recordQuote(db, job, agent, { unitPriceCents: 100, etaMinutes: 3, message: "" });
-    const pending = listQuotes(db, job.id).find((q) => q.agent_id === agent2.id)!;
+    const pending = listQuotes(db, job.id).find((q) => q.agent_id !== agent.id)!;
     expect(pending.status).toBe("pending");
     await expect(awardJob({ db, flow }, { jobId: job.id, quoteId: pending.id, buyerId: buyer.id })).rejects.toThrow(/pending|incomplete/);
     const r = await awardJob({ db, flow }, { jobId: job.id, quoteId: q1.id, buyerId: buyer.id });
-    expect(listQuotes(db, job.id).find((q) => q.agent_id === agent2.id)!.status).toBe("pending");
+    expect(listQuotes(db, job.id).filter((q) => q.agent_id !== agent.id).every((q) => q.status === "pending")).toBe(true);
     db.run("UPDATE pacts SET checkout_deadline = '2000-01-01T00:00:00.000Z' WHERE id = ?", [r.pact.id]);
     await expireCheckouts(flow);
     reopenJobFor(db, getPact(db, r.pact.id)!);
-    expect(listQuotes(db, job.id).map((q) => q.status).sort()).toEqual(["open", "pending"]);
+    expect(listQuotes(db, job.id).map((q) => q.status).sort()).toEqual(["open", "pending", "pending"]);
   });
 
   test("a stored key is bound to its provider: switching provider needs a new key, and a frozen pact refuses a mismatched key", async () => {
@@ -242,5 +253,48 @@ describe("marketplace", () => {
     void reopen; // the migration statement runs in openDb(); apply it directly here on the in-memory db
     db.run("UPDATE agents SET key_provider = provider WHERE api_key_enc IS NOT NULL AND key_provider IS NULL AND provider != 'platform' AND updated_at = created_at");
     expect(eligibleAgents(db, job).map((x) => x.id)).toContain(a.id);
+  });
+
+  test("three seeded personas quote the same job; the buyer has a real choice", () => {
+    const { db, seller, job } = setup();
+    const agents = eligibleAgents(db, job);
+    expect(agents.map((a) => a.name).sort()).toEqual(["Boutique Voice", "Budget Scribe", "Copywriter One"]); // all within band for a 150¢ max
+    expect(agents.every((a) => a.owner_id === seller.id)).toBe(true);
+    const cheap = createJob(db, job.buyer_id, { template: "product_descriptions", title: "Cheap job", brief: "Write a short, factual product description per SKU.", items: [{ sku: "A", facts: { name: "A" } }], maxUnitPriceCents: 60 });
+    expect(eligibleAgents(db, cheap).map((a) => a.name).sort()).toEqual(["Budget Scribe", "Copywriter One"]); // Boutique's minimum is above the max
+  });
+
+  test("job caps: per day and open at a time (not for seeded accounts)", () => {
+    const { db, buyer } = setup();
+    const input = { template: "product_descriptions" as const, title: "Capped job", brief: "Write a short, factual product description per SKU.", items: [{ sku: "A", facts: { name: "A" } }], maxUnitPriceCents: 100 };
+    for (let i = 1; i < JOB_LIMITS.open; i++) createJob(db, buyer.id, input, { enforceLimits: true }); // setup() already posted one
+    expect(() => createJob(db, buyer.id, input, { enforceLimits: true })).toThrow(/open jobs/);
+    createJob(db, buyer.id, input); // seeded/dev callers skip the limits
+  });
+
+  test("cancel: open only, quotes lost; close: job CLOSED when its pact pays out", async () => {
+    const { db, buyer, agent, flow, job, pp } = setup();
+    recordQuote(db, job, agent, { unitPriceCents: 100, etaMinutes: 3, message: "" });
+    const closed = cancelJob(db, buyer.id, job.id);
+    expect(closed.status).toBe("CLOSED");
+    expect(listQuotes(db, job.id)[0]!.status).toBe("lost");
+    expect(() => cancelJob(db, buyer.id, job.id)).toThrow(/CLOSED/);
+    const job2 = createJob(db, buyer.id, { template: "product_descriptions", title: "Second", brief: "Write a short, factual product description per SKU.", items: [{ sku: "A", facts: { name: "A" } }], maxUnitPriceCents: 100 });
+    const q = recordQuote(db, job2, agent, { unitPriceCents: 100, etaMinutes: 3, message: "" });
+    const r = await awardJob({ db, flow }, { jobId: job2.id, quoteId: q.id, buyerId: buyer.id });
+    pp.approveOrder(r.pact.order_id!);
+    await completeCheckout(flow, r.pact.id, r.pact.order_id!);
+    db.run("INSERT INTO artifacts (pact_id, body_json, submitted_at) VALUES (?, ?, '2026')", [r.pact.id, JSON.stringify([{ sku: "A", title: "A", description: "An A." }])]);
+    transition(db, r.pact.id, "DELIVERED");
+    db.run("INSERT INTO item_verdicts (pact_id, sku, verdict, reason, score, evidence_json) VALUES (?, 'A', 'accepted', 'ok', 1, '[]')", [r.pact.id]);
+    transition(db, r.pact.id, "VERIFIED", { accepted_count: 1 });
+    const settled = await settlePact(flow, r.pact.id, [{ sku: "A", verdict: "accepted", reason: "ok", score: 1, evidence: [] }]);
+    expect(settled!.status).toBe("SETTLED");
+    const d = deliverableFor(db, settled!);
+    expect(d.accepted).toEqual([{ sku: "A", title: "A", description: "An A." }]);
+    expect(d.rejected).toEqual([]);
+    db.run("UPDATE pacts SET status = 'PAID_OUT' WHERE id = ?", [r.pact.id]);
+    reopenJobFor(db, getPact(db, r.pact.id)!);
+    expect(getJob(db, job2.id)!.status).toBe("CLOSED");
   });
 });

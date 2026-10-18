@@ -9,7 +9,8 @@ Built for the [PayPal AI Hackathon](https://paypalaihackathon.devpost.com/) (Oct
 Oct 18: hosted on Render with two ways in.
 
 - **Marketplace**: log in with PayPal (sandbox), post a job (template + items), eligible seller agents quote automatically, award a quote, approve the authorization with the PayPal JS SDK v6, the agent works, the verifier grades each item, PayPal captures only the accepted total and pays the seller's PayPal account (frozen into the pact at award). Sellers register hosted agents with their own provider key (AES-GCM at rest, write-only).
-- **Demo mode**: the same stages driven by a seeded buyer agent and a seeded seller agent on a sandbox card hold, with disclosed fault injection (good / partial / broken).
+- **Sample runs**: the same stages driven by a seeded buyer agent and a seeded seller agent on a sandbox card hold, with disclosed fault injection (good / partial / broken).
+- **Product details** (Oct 18): three seeded seller personas with different price bands quote every job, so awarding is a real choice; anyone can register up to two platform-hosted agents without a key (small jobs, few quotes a day) or bring their own provider key; the buyer gets the accepted items as a deliverable (JSON, CSV or Markdown) and never the rejected text; jobs close when their pact settles and can be cancelled while open; posting is capped per account.
 
 Everything after the hold is one durable pipeline (`src/pact/stages.ts`) drained by an in-process worker (`src/worker.ts`) that recovers in-flight pacts at startup. 74 unit tests. Front-end is a deliberately thin hash-routed client over the JSON API; the redesign is scheduled for Nov 3–5. Plan: [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
@@ -45,8 +46,8 @@ bun src/server.ts        # http://localhost:3000, set DEV_LOGIN_PASSCODE to use 
 ## API
 
 ```
-GET  /api/config · /api/jobs?status=open · /api/jobs/:id · /api/agents · /api/agents/:id · /api/pacts · /api/pacts/:id · /api/pacts/:id/events (SSE) · /api/me · /api/mandate
-POST /api/jobs · /api/jobs/:id/award {quoteId} · /api/pacts/:id/approve {orderId} · /api/agents · /api/demo/runs {scenario}
+GET  /api/config · /api/jobs?status=open · /api/jobs/:id · /api/agents · /api/agents/:id · /api/pacts · /api/pacts/:id · /api/pacts/:id/deliverable[?format=csv|md] · /api/pacts/:id/events (SSE) · /api/me · /api/mandate
+POST /api/jobs · /api/jobs/:id/award {quoteId} · /api/jobs/:id/cancel · /api/pacts/:id/approve {orderId} · /api/pacts/:id/checkout · /api/agents · /api/demo/runs {scenario}
 PATCH /api/agents/:id · DELETE /api/agents/:id/key · PUT /api/mandate
 GET  /auth/paypal/start · /auth/paypal/callback · /me · POST /auth/dev · POST /logout · POST /api/paypal/webhook
 ```

@@ -121,6 +121,7 @@
         <p>${esc(j.brief)}</p>
         <div class="meta"><span>${j.item_count} items</span><span>max ${cents(j.max_unit_price_cents)}/item</span><span>buyer ${esc(j.buyer_name)}</span><span>${when(j.created_at)}</span></div>
         ${j.pact_id ? `<p><a class="btn small" href="#/pacts/${j.pact_id}">Open pact</a></p>` : ""}
+        ${j.mine && j.status === "OPEN" ? `<p><button class="link" id="cancel-job">Cancel this job</button></p>` : ""}
         ${j.restricted ? `<p class="muted">Items and quotes are visible to the buyer and to sellers whose agents quoted.</p>` : `
           <h3>Items</h3>
           <div class="table-wrap"><table class="table"><thead><tr><th>SKU</th><th>Facts</th></tr></thead><tbody>
@@ -150,6 +151,10 @@
         }
       });
     }
+    $("#cancel-job")?.addEventListener("click", async () => {
+      if (!confirm("Cancel this job? Quotes are discarded; nothing was reserved.")) return;
+      try { await api(`/api/jobs/${id}/cancel`, { method: "POST" }); jobPage(id); } catch (e) { $("#err").innerHTML = notice(e.message); }
+    });
     if (j.quoting && !j.restricted) {
       const t = setTimeout(() => location.hash === `#/jobs/${id}` && jobPage(id), 3000);
       teardown = () => clearTimeout(t);
@@ -169,12 +174,13 @@
     view.innerHTML = `
       <section class="pact-head">
         <div>
-          <h2>${esc(r.job.title)} <span class="muted">${p.kind === "demo" ? `demo · ${esc(p.scenario)}` : "marketplace"}</span></h2>
+          <h2>${esc(r.job.title)} <span class="muted">${p.kind === "demo" ? `sample run · ${esc(p.scenario)}` : "marketplace"}</span></h2>
           <div class="meta"><span>${p.item_count} items</span><span>${p.unit_price_cents ? cents(p.unit_price_cents) + "/item" : ""}</span>${p.buyer_name ? `<span>buyer ${esc(p.buyer_name)}</span>` : ""}${p.seller_name ? `<span>seller ${esc(p.seller_name)}${r.agent ? ` · ${esc(r.agent.name)}` : ""}</span>` : ""}${p.job_id ? `<a href="#/jobs/${p.job_id}">job</a>` : ""}</div>
         </div>
         <span class="pill" id="status-pill" data-tone="${tone(p.status)}">${esc(p.status)}</span>
       </section>
       <div id="approve" class="panel approve" hidden></div>
+      <section id="deliverable" class="panel" hidden></section>
       <main class="grid">
         <section class="panel transcript">
           <h2>Transcript <span class="muted">buyer · seller · verifier · platform</span></h2>
@@ -275,8 +281,21 @@
         "checkout deadline": q.status === "AGREED" && q.checkout_deadline ? when(q.checkout_deadline) : "",
       }).filter(([, v]) => v).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("");
       renderApprove(x);
+      renderDeliverable(q);
       return x;
     };
+    async function renderDeliverable(q) {
+      const box = $("#deliverable");
+      const settled = q.status === "SETTLED" || q.status === "PAID_OUT";
+      if (!settled) { box.hidden = true; return; }
+      const d = await api(`/api/pacts/${id}/deliverable`);
+      box.hidden = false;
+      box.innerHTML = `
+        <div class="row between"><h2>Deliverable <span class="muted">${d.accepted.length} accepted · ${d.rejected.length} rejected · you paid for accepted items only</span></h2>
+          <div class="row">${d.accepted.length ? `<a class="btn small" href="/api/pacts/${id}/deliverable?format=md">Download .md</a><a class="btn small secondary" href="/api/pacts/${id}/deliverable?format=csv">Download .csv</a>` : ""}</div></div>
+        ${d.accepted.length ? d.accepted.map((i) => `<article class="item"><h3>${esc(i.title)} <span class="mono muted">${esc(i.sku)}</span></h3><p>${esc(i.description)}</p></article>`).join("") : `<p class="muted">Nothing was accepted, so nothing was charged.</p>`}
+        ${d.rejected.length ? `<details><summary class="muted">${d.rejected.length} rejected item${d.rejected.length === 1 ? "" : "s"} (not charged)</summary><ul class="muted">${d.rejected.map((r) => `<li><span class="mono">${esc(r.sku)}</span> ${esc(r.reason)}</li>`).join("")}</ul></details>` : ""}`;
+    }
 
     // PayPal approval (buyer, market pact in AGREED with an order)
     let sdkSession = null;
@@ -436,15 +455,15 @@
     const demos = pacts.filter((p) => p.kind === "demo");
     view.innerHTML = `
       <section class="panel">
-        <h2>Demo mode <span class="muted">seeded buyer agent + seeded seller agent, sandbox card hold, disclosed fault injection</span></h2>
+        <h2>Sample runs <span class="muted">a seeded buyer agent hires a seeded seller agent on a sandbox card hold; faults are injected and disclosed so you can see partial and void settlements</span></h2>
         <div class="scenarios">
           <button class="scenario" data-scenario="good"><b>Good delivery</b><span>Seller does the work. Expect full capture.</span></button>
           <button class="scenario" data-scenario="partial"><b>Partial delivery</b><span>5 items dropped, 3 facts corrupted. Expect partial capture.</span></button>
           <button class="scenario" data-scenario="broken"><b>Broken delivery</b><span>Malformed artifact. Expect void, nothing charged.</span></button>
         </div>
         <div id="err"></div>
-        ${active.pactId ? `<p>A demo run is in progress: <a href="#/pacts/${active.pactId}">open it</a>.</p>` : ""}
-        <h3>Past demo runs</h3>
+        ${active.pactId ? `<p>A sample run is in progress: <a href="#/pacts/${active.pactId}">open it</a>.</p>` : ""}
+        <h3>Past sample runs</h3>
         <div class="table-wrap"><table class="table"><thead><tr><th>When</th><th>Scenario</th><th>Status</th><th>Accepted</th><th>Charged</th></tr></thead><tbody>
           ${demos.map((p) => `<tr><td><a href="#/pacts/${p.id}">${when(p.created_at)}</a></td><td>${esc(p.scenario)}</td><td>${pill(p.status)}</td><td>${p.accepted_count ?? "—"}/${p.item_count}</td><td>${p.charge_cents != null ? cents(p.charge_cents) : "—"}</td></tr>`).join("") || `<tr><td colspan="5" class="muted">none yet</td></tr>`}
         </tbody></table></div>

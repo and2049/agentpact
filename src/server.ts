@@ -14,7 +14,7 @@ import { loadLlmConfig, models } from "./llm";
 import { ANY, createMandate, getMandate, MandateViolation, updateMandateCaps } from "./mandate";
 import { AgentError, AgentInput, AgentPatch, createAgent, deleteAgentKey, ensureSeedAgent, getAgent, listAgents, llmConfigForAgent, publicAgent, updateAgent, type AgentDeps } from "./market/agents";
 import { redactedError, redactSecrets } from "./redact";
-import { awardJob, canSeeJobDetails, createJob, getJob, JobError, JobInput, jobSpecOf, listJobs, listQuotes, mandateForBuyer, publicJob, recordQuote, reopenJobFor, reserveQuoteSlots, TEMPLATES } from "./market/jobs";
+import { awardJob, cancelJob, canSeeJobDetails, createJob, deliverableFor, getJob, JobError, JobInput, jobSpecOf, listJobs, listQuotes, mandateForBuyer, publicJob, recordQuote, reopenJobFor, reserveQuoteSlots, TEMPLATES } from "./market/jobs";
 import { getPact, jobOf } from "./pact/machine";
 import { preparePact } from "./pact/run";
 import { TERMINAL, type Agents } from "./pact/stages";
@@ -98,7 +98,7 @@ async function quoteOpenJob(jobId: string) {
     try {
       const cfg = await llmConfigForAgent(agentDeps, agent);
       key = cfg.apiKey;
-      q = await guarded(() => llmQuote(spec, models(cfg, `quote-${job.id}-${agent.id}`).main), [key]);
+      q = await guarded(() => llmQuote(spec, models(cfg, `quote-${job.id}-${agent.id}`).main, { sellerPrompt: agent.system_prompt, band: { min: agent.min_unit_price_cents, max: Math.min(agent.max_unit_price_cents, job.max_unit_price_cents) }, agentName: agent.name }), [key]);
     } catch (e) {
       q = { unitPriceCents: Math.round((agent.min_unit_price_cents + Math.min(agent.max_unit_price_cents, job.max_unit_price_cents)) / 2), etaMinutes: Math.max(2, items), message: `Automated quote from ${agent.name}: ${items} items, paid per accepted item.` };
       console.error(`quote via LLM failed for agent ${agent.id}: ${redactSecrets(String((e as Error).message), [key])}`);
@@ -308,7 +308,7 @@ app.get("/api/jobs", (c) => {
 app.post("/api/jobs", async (c) => {
   const user = requireUser(c);
   const input = await body(c, JobInput);
-  const job = createJob(db, user.id, input);
+  const job = createJob(db, user.id, input, { enforceLimits: user.provider !== "dev" });
   enqueue(db, job.id, "quote_job");
   return c.json({ ...publicJob(db, job), items: input.items, rubric: JSON.parse(job.rubric_json), quotes: [] }, 201);
 });
@@ -338,6 +338,12 @@ app.post("/api/jobs/:id/award", async (c) => {
   const r = await awardJob({ db, flow }, { jobId: c.req.param("id"), quoteId: b.quoteId, buyerId: user.id });
   if (r.pact.status !== "AGREED") reopenJobFor(db, r.pact);
   return c.json({ pactId: r.pact.id, orderId: r.pact.order_id, status: r.pact.status, checkout: r.checkout.ok ? "ready" : r.checkout.code, message: r.checkout.ok ? "" : r.checkout.message }, r.checkout.ok ? 201 : 409);
+});
+
+/** Buyer withdraws an open job. */
+app.post("/api/jobs/:id/cancel", (c) => {
+  const user = requireUser(c);
+  return c.json(publicJob(db, cancelJob(db, user.id, c.req.param("id"))));
 });
 
 // ---------- pacts ----------
@@ -388,6 +394,24 @@ app.get("/api/pacts/:id", (c) => {
     events: listEvents(db, pact.id),
     tasks: listTasks(db, pact.id),
   });
+});
+
+/** What the buyer bought. JSON by default; ?format=csv or md for download. Owner-only (demo public). */
+app.get("/api/pacts/:id/deliverable", (c) => {
+  const { pact } = requirePactView(c, c.req.param("id"));
+  const d = deliverableFor(db, pact);
+  const format = c.req.query("format") ?? "json";
+  const name = `agentpact-${pact.id.slice(0, 8)}`;
+  if (format === "csv") {
+    const q = (v: string) => `"${String(v).replace(/"/g, '""')}"`;
+    const csv = ["sku,title,description", ...d.accepted.map((i) => [i.sku, i.title, i.description].map(q).join(","))].join("\n");
+    return c.body(csv, 200, { "Content-Type": "text/csv; charset=utf-8", "Content-Disposition": `attachment; filename="${name}.csv"` });
+  }
+  if (format === "md") {
+    const md = [`# ${jobOf(pact).title}`, "", `${d.accepted.length} accepted item${d.accepted.length === 1 ? "" : "s"} (pact ${pact.id}).`, "", ...d.accepted.flatMap((i) => [`## ${i.title} (${i.sku})`, "", i.description, ""])].join("\n");
+    return c.body(md, 200, { "Content-Type": "text/markdown; charset=utf-8", "Content-Disposition": `attachment; filename="${name}.md"` });
+  }
+  return c.json(d);
 });
 
 /** Event stream for one pact: replays history, then tails new events. */
@@ -455,7 +479,7 @@ function activeDemoRun(): string | null {
 app.post("/api/demo/runs", async (c) => {
   const b = await body(c, z.object({ scenario: z.enum(["good", "partial", "broken"]).default("good") }));
   const active = activeDemoRun();
-  if (active) return c.json({ error: "a demo run is already in progress", pactId: active }, 409);
+  if (active) return c.json({ error: "a sample run is already in progress", pactId: active }, 409);
   try {
     loadLlmConfig(env);
   } catch (e) {
