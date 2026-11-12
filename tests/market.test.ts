@@ -4,7 +4,7 @@ import { openDb } from "../src/db";
 import { getMandate } from "../src/mandate";
 import { AgentInput, AgentPatch, createAgent, ensureSeedAgent, getAgent, llmConfigForAgent, modelAllowed, publicAgent, updateAgent, type AgentDeps } from "../src/market/agents";
 import { redactedError, redactSecrets } from "../src/redact";
-import { awardJob, cancelJob, canSeeJobDetails, createJob, deliverableFor, eligibleAgents, getJob, JOB_LIMITS, jobSpecOf, listQuotes, mandateForBuyer, recordQuote, reopenJobFor, reserveQuoteSlots } from "../src/market/jobs";
+import { awardJob, cancelJob, canSeeJobDetails, createJob, deliverableFor, eligibleAgents, getJob, JOB_LIMITS, jobSpecOf, listJobs, listQuotes, mandateForBuyer, marketStats, reasonText, recordQuote, reopenJobFor, reserveQuoteSlots } from "../src/market/jobs";
 import { getPact } from "../src/pact/machine";
 import { completeCheckout, expireCheckouts } from "../src/payments/checkout";
 import { settlePact } from "../src/payments/flow";
@@ -341,6 +341,62 @@ describe("marketplace", () => {
       [pact.id],
     );
     expect(publicAgent(db, getAgent(db, agent.id)!).stats).toEqual({ settled: 1, items: 3, accepted: 2, acceptanceRate: 2 / 3, earnedCents: 200 });
+  });
+
+  test("direct hire: only the invited agent quotes, bad invitations are refused, and the job stays off the public board", () => {
+    const { db, buyer, seller, agent, job } = setup();
+    const base = { template: "product_descriptions" as const, title: "Direct order", brief: "Write a short, factual product description per SKU.", items: [{ sku: "A", facts: { name: "A" } }], maxUnitPriceCents: 150 };
+    const hire = createJob(db, buyer.id, { ...base, agentId: agent.id });
+    expect(hire.agent_id).toBe(agent.id);
+    expect(eligibleAgents(db, hire).map((a) => a.id)).toEqual([agent.id]); // not the other two personas
+    expect(reserveQuoteSlots(db, hire).map((a) => a.id)).toEqual([agent.id]);
+    expect(eligibleAgents(db, job)).toHaveLength(3); // an open job still reaches everyone
+
+    expect(() => createJob(db, buyer.id, { ...base, agentId: "nope" })).toThrow(/not available/);
+    expect(() => createJob(db, seller.id, { ...base, agentId: agent.id })).toThrow(/your own agent/);
+    expect(() => createJob(db, buyer.id, { ...base, maxUnitPriceCents: 10, agentId: agent.id })).toThrow(/starts at \$0\.50/);
+    expect(() => createJob(db, buyer.id, { ...base, items: Array.from({ length: 20 }, (_, i) => ({ sku: `S${i}`, facts: { name: `N${i}` } })), agentId: agent.id })).not.toThrow();
+    db.run("UPDATE agents SET status = 'paused' WHERE id = ?", [agent.id]);
+    expect(() => createJob(db, buyer.id, { ...base, agentId: agent.id })).toThrow(/not available/);
+
+    const board = listJobs(db, { status: "OPEN", board: true }).map((j) => j.id);
+    expect(board).toContain(job.id);
+    expect(board).not.toContain(hire.id);
+    expect(listJobs(db, { buyerId: buyer.id }).map((j) => j.id)).toContain(hire.id); // the buyer still sees it
+  });
+
+  test("the public board leaves out jobs created by automated demo runs", async () => {
+    const { db, buyer, agent, flow, job } = setup();
+    const q = recordQuote(db, job, agent, { unitPriceCents: 100, etaMinutes: 3, message: "ok" });
+    const { pact } = await awardJob({ db, flow }, { jobId: job.id, quoteId: q.id, buyerId: buyer.id });
+    expect(listJobs(db, { status: "AWARDED", board: true }).map((j) => j.id)).toEqual([job.id]);
+    db.run("UPDATE pacts SET kind = 'demo' WHERE id = ?", [pact.id]);
+    expect(listJobs(db, { status: "AWARDED", board: true })).toEqual([]);
+  });
+
+  test("market stats: settled marketplace pacts only; captured, released and paid out add up", async () => {
+    const { db, buyer, agent, flow, job } = setup();
+    expect(marketStats(db).totals).toMatchObject({ pacts: 0, items: 0, capturedCents: 0, releasedCents: 0 });
+    const q = recordQuote(db, job, agent, { unitPriceCents: 100, etaMinutes: 3, message: "ok" });
+    const { pact } = await awardJob({ db, flow }, { jobId: job.id, quoteId: q.id, buyerId: buyer.id });
+    expect(marketStats(db).totals.pacts).toBe(0); // awarded, not settled
+    db.run("UPDATE pacts SET status = 'PAID_OUT', settlement_kind = 'partial', authorized_cents = 300, accepted_count = 2, charge_cents = 200 WHERE id = ?", [pact.id]);
+    db.run(
+      "INSERT INTO pacts (id, mandate_id, status, kind, agent_id, job_json, item_count, accepted_count, authorized_cents, charge_cents, created_at, updated_at) SELECT 'demo-run', mandate_id, 'SETTLED', 'demo', agent_id, job_json, 20, 0, 3000, 0, created_at, updated_at FROM pacts WHERE id = ?",
+      [pact.id],
+    );
+    const s = marketStats(db);
+    expect(s.totals).toEqual({ pacts: 1, items: 3, accepted: 2, capturedCents: 200, releasedCents: 100, paidOutCents: 200, agents: 3 });
+    expect(s.recent).toHaveLength(1);
+    expect(s.recent[0]).toMatchObject({ title: "Three widgets", agent_name: agent.name, item_count: 3, accepted_count: 2, authorized_cents: 300, charge_cents: 200, settlement_kind: "partial" });
+  });
+
+  test("reasonText: rubric verdicts read as the verifier's finding, gate verdicts are unchanged", () => {
+    expect(reasonText("rubric 1.00 >= 0.6", ["quality 5/5: All four facts appear verbatim."])).toBe("All four facts appear verbatim.");
+    expect(reasonText("rubric 0.00 < 0.6", ["invented claim: inflatable", "quality 3/5: Fine otherwise."])).toBe("invented claim: inflatable");
+    expect(reasonText("rubric 0.60 >= 0.6", [])).toBe("rubric 0.60 >= 0.6");
+    expect(reasonText("missing", [])).toBe("missing");
+    expect(reasonText('fact "name" (Ember Camp Stove) not mentioned', ['fact "name" (Ember Camp Stove) not mentioned'])).toBe('fact "name" (Ember Camp Stove) not mentioned');
   });
 
   test("three seeded personas quote the same job; the buyer has a real choice", () => {

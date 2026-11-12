@@ -29,6 +29,7 @@ export function JobPage() {
   if (!j) return <LoadingBlock />
 
   const quotes = j.quotes ?? []
+  const hired = j.agent_name ?? "the agent"
   const award = async (quoteId: string) => {
     setAwarding(quoteId)
     setActionError(null)
@@ -65,7 +66,7 @@ export function JobPage() {
               </Button>
             )}
             {j.mine && j.status !== "OPEN" && (
-              <Button variant="outline" render={<Link to={`/post?from=${j.id}`} />} nativeButton={false}>
+              <Button variant="outline" render={<Link to={`/post?from=${j.id}${j.agent_id ? `&agent=${j.agent_id}` : ""}`} />} nativeButton={false}>
                 Post a similar job
               </Button>
             )}
@@ -93,6 +94,7 @@ export function JobPage() {
         <Meta>{plural(j.item_count, "item")}</Meta>
         <Meta mono>max {cents(j.max_unit_price_cents)}/item</Meta>
         <Meta label="buyer">{j.buyer_name}</Meta>
+        {j.agent_id && <Meta label="direct hire">{j.agent_name ?? "one agent"}</Meta>}
         <Meta>{when(j.created_at)}</Meta>
         {j.rubric && <Meta>{j.rubric.minWords}–{j.rubric.maxWords} words</Meta>}
       </MetaList>
@@ -136,17 +138,17 @@ export function JobPage() {
           </Section>
 
           <Section
-            title="Quotes"
-            description={j.quoting ? "Agents are quoting…" : plural(quotes.length, "quote")}
+            title={j.agent_id ? "Quote" : "Quotes"}
+            description={j.quoting ? (j.agent_id ? `${hired} is quoting…` : "Agents are quoting…") : plural(quotes.length, "quote")}
             aside={j.quoting ? <Spinner className="text-muted-foreground" /> : undefined}
           >
             {quotes.length === 0 ? (
               <EmptyState
-                title={j.quoting ? "Waiting for eligible agents" : "No eligible agents quoted"}
-                description={j.quoting ? "Quotes appear here as each agent responds." : "Raise the maximum price per item, or check the agents page for who is active."}
+                title={j.agent_id ? (j.quoting ? `Waiting for ${hired}` : `${hired} did not quote`) : j.quoting ? "Waiting for eligible agents" : "No eligible agents quoted"}
+                description={j.agent_id ? (j.quoting ? "Its quote appears here in a few seconds." : "Try again later, or post the job to all agents.") : j.quoting ? "Quotes appear here as each agent responds." : "Raise the maximum price per item, or check the agents page for who is active."}
               />
             ) : (
-              <div className="grid gap-3 md:grid-cols-2">
+              <div className={j.agent_id ? "grid max-w-xl gap-3" : "grid gap-3 md:grid-cols-2"}>
                 {quotes.map((q) => (
                   <QuoteCard key={q.id} quote={q} itemCount={j.item_count} canAward={j.mine && j.status === "OPEN" && q.status === "open"} awarding={awarding === q.id} onAward={() => award(q.id)} />
                 ))}

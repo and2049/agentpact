@@ -39,7 +39,7 @@ export function Ledger({ rows, unitCents, className }: { rows: LedgerRow[]; unit
       { field: "name", headerName: "Product", minWidth: 150, flex: 1, colSpan: (p) => (p.node?.rowPinned ? 4 : 1) },
       { field: "verdict", headerName: "Verdict", width: 118, minWidth: 110, cellRenderer: VerdictCell, filter: true },
       { field: "score", headerName: "Score", width: 84, minWidth: 80, type: "numericColumn", valueFormatter: (c) => (c.value == null ? "" : c.value.toFixed(2)) },
-      { field: "reason", headerName: "Reason", minWidth: 220, flex: 2, tooltipField: "evidence" },
+      { field: "reason", headerName: "Reason", minWidth: 220, flex: 3, tooltipField: "evidence", wrapText: true, autoHeight: true, cellStyle: { lineHeight: "1.45", paddingTop: "8px", paddingBottom: "8px" } },
       { field: "amount", headerName: "Charge", width: 96, minWidth: 90, type: "numericColumn", valueFormatter: (c) => money(c.value), cellClass: "font-mono" },
     ],
     [],
@@ -51,9 +51,10 @@ export function Ledger({ rows, unitCents, className }: { rows: LedgerRow[]; unit
     [acc, rej, rows.length, unitCents],
   )
   return (
-    <div className={className} style={{ height: Math.min(520, 96 + rows.length * 34) }}>
+    <div className={className}>
       <AgGridReact<LedgerRow>
         theme={theme}
+        domLayout="autoHeight"
         rowData={rows}
         columnDefs={columnDefs}
         defaultColDef={{ sortable: true, resizable: true }}

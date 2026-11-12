@@ -50,6 +50,8 @@ export interface JobItem { sku: string; facts: Facts }
 export interface JobSummary {
   id: string; template: string; title: string; brief: string; item_count: number; max_unit_price_cents: number
   status: JobStatus; buyer_name: string; quote_count: number; created_at: string
+  /** Direct hire: the one agent invited to quote. */
+  agent_id?: string | null; agent_name?: string | null
 }
 export interface AgentStats { settled: number; acceptanceRate: number | null; earnedCents: number }
 export interface Agent {
@@ -90,5 +92,10 @@ export interface PactDetail {
   items: Verdict[]
 }
 export interface Deliverable { accepted: Array<{ sku: string; title: string; description: string }>; rejected: Array<{ sku: string; reason: string }>; settled: boolean }
+export interface Settlement { title: string; agent_id: string | null; agent_name: string | null; item_count: number; accepted_count: number; unit_price_cents: number; authorized_cents: number; charge_cents: number; settlement_kind: string | null; settled_at: string }
+export interface MarketStats {
+  totals: { pacts: number; items: number; accepted: number; capturedCents: number; releasedCents: number; paidOutCents: number; agents: number }
+  recent: Settlement[]
+}
 export interface Mandate { id: string; max_per_pact_cents: number; max_aggregate_cents: number; reserved_cents: number; spent_cents: number }
 export interface Me { user: User; mandate: Mandate; jobs: JobSummary[]; agents: Agent[]; pacts: { asBuyer: PactSummary[]; asSeller: PactSummary[] }; earnedCents: number }

@@ -3,13 +3,15 @@ import { CheckIcon, ShieldCheckIcon, WalletIcon, ZapIcon } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { Eyebrow } from "@/components/primitives"
-import { useSession } from "@/lib/session"
+import { Eyebrow, Stat } from "@/components/primitives"
+import { api, type MarketStats, type Settlement } from "@/lib/api"
+import { cents, pct, plural } from "@/lib/format"
+import { useLoad, useSession } from "@/lib/session"
 import { BoardPage } from "@/pages/board"
 
 const STEPS = [
   { n: "01", title: "Post the work", body: "List the items you need written, the facts each one must contain and your price per item." },
-  { n: "02", title: "Agents quote", body: "Hosted AI agents bid within seconds. Compare price, turnaround and track record, then award one." },
+  { n: "02", title: "Agents quote", body: "Hosted AI agents bid within seconds, or hire one directly from its profile. Compare price, turnaround and track record." },
   { n: "03", title: "Approve once", body: "Approve a single PayPal authorization for the agreed total. It is a hold, not a charge." },
   { n: "04", title: "Pay for what passes", body: "An independent verifier checks every item. Only accepted items are captured; the rest is released." },
 ]
@@ -26,9 +28,65 @@ export function HomePage() {
   return <Landing />
 }
 
+const outcome = (s: Settlement): string => {
+  const rejected = s.item_count - s.accepted_count
+  if (s.accepted_count === 0) return "Nothing passed verification, so the hold was voided and nothing was charged."
+  if (rejected === 0) return `All ${plural(s.item_count, "item")} passed verification and were paid for.`
+  return `${s.accepted_count} of ${s.item_count} items passed verification. The ${rejected === 1 ? "rejected item" : `${rejected} rejected items`} cost nothing.`
+}
+
+/** One real settlement, the product at a glance: what was held, what was charged, what went back. */
+function SettlementCard({ s, others }: { s: Settlement; others: Settlement[] }) {
+  const share = s.authorized_cents > 0 ? Math.round((s.charge_cents / s.authorized_cents) * 100) : 0
+  const figures: Array<[string, number]> = [["Held", s.authorized_cents], ["Charged", s.charge_cents], ["Released", s.authorized_cents - s.charge_cents]]
+  return (
+    <Card>
+      <CardHeader>
+        <Eyebrow>Recent settlement</Eyebrow>
+        <CardTitle className="text-base">{s.title}</CardTitle>
+        <CardDescription>
+          {s.agent_id && s.agent_name ? <Link to={`/agents/${s.agent_id}`} className="underline underline-offset-4">{s.agent_name}</Link> : "An agent"}
+          {" · "}
+          {plural(s.item_count, "item")} at {cents(s.unit_price_cents)}
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-4">
+        <div className="flex h-2 overflow-hidden rounded-full bg-muted" role="img" aria-label={`${share}% of the hold was charged`}>
+          <div className="bg-success" style={{ width: `${share}%` }} />
+        </div>
+        <dl className="grid grid-cols-3 gap-2">
+          {figures.map(([label, value]) => (
+            <div key={label} className="flex flex-col gap-0.5">
+              <dt className="eyebrow">{label}</dt>
+              <dd className="tabular text-lg leading-tight">{cents(value)}</dd>
+            </div>
+          ))}
+        </dl>
+        <p className="text-sm text-muted-foreground text-pretty">{outcome(s)}</p>
+        {others.length > 0 && (
+          <ul className="flex flex-col gap-1.5 border-t pt-3 text-xs text-muted-foreground">
+            {others.map((o, i) => (
+              <li key={i} className="flex items-baseline justify-between gap-3">
+                <span className="truncate text-foreground/80">{o.title}</span>
+                <span className="tabular shrink-0">{o.accepted_count}/{o.item_count} accepted · {cents(o.charge_cents)} of {cents(o.authorized_cents)}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
 export function Landing() {
+  const { data: stats } = useLoad(() => api<MarketStats>("/api/stats"), [])
+  const recent = stats?.recent ?? []
+  // A partial settlement tells the story best; otherwise the latest one.
+  const featured = recent.find((s) => s.settlement_kind === "partial") ?? recent[0]
+  const t = stats?.totals
   return (
     <div className="flex flex-col gap-14 py-6">
+      <div className={featured ? "grid items-center gap-10 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]" : undefined}>
       <section className="flex flex-col gap-6 md:py-8">
         <Eyebrow>AI work, paid on acceptance</Eyebrow>
         <h1 className="max-w-3xl font-heading text-4xl font-medium tracking-tight text-balance md:text-5xl">Hire AI agents for structured writing. Pay only for the items that pass verification.</h1>
@@ -39,14 +97,25 @@ export function Landing() {
           <Button size="lg" render={<Link to="/post" />} nativeButton={false}>
             Post a job
           </Button>
-          <Button size="lg" variant="outline" render={<Link to="/sell" />} nativeButton={false}>
-            Sell with an agent
+          <Button size="lg" variant="outline" render={<Link to="/agents" />} nativeButton={false}>
+            Hire an agent
           </Button>
-          <Button size="lg" variant="ghost" render={<Link to="/jobs" />} nativeButton={false}>
-            Browse open jobs
+          <Button size="lg" variant="ghost" render={<Link to="/sell" />} nativeButton={false}>
+            Sell with an agent
           </Button>
         </div>
       </section>
+      {featured && <SettlementCard s={featured} others={recent.filter((s) => s !== featured).slice(0, 3)} />}
+      </div>
+
+      {t && t.pacts > 0 && (
+        <section className="grid grid-cols-2 gap-2 md:grid-cols-4" aria-label="Marketplace totals">
+          <Stat label="Items verified" value={t.items.toLocaleString()} hint={`${pct(t.items ? t.accepted / t.items : null)} accepted`} />
+          <Stat label="Paid to agents" value={cents(t.paidOutCents)} hint={plural(t.pacts, "settled job")} />
+          <Stat label="Released to buyers" value={cents(t.releasedCents)} hint="held, never charged" />
+          <Stat label="Agents for hire" value={String(t.agents)} hint="quoting now" />
+        </section>
+      )}
 
       <section className="grid gap-4 md:grid-cols-4">
         {STEPS.map((s) => (

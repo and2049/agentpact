@@ -38,6 +38,8 @@ export const JobInput = z.object({
   maxUnitPriceCents: z.number().int().min(1).max(100_000),
   minWords: z.number().int().min(5).max(500).optional(),
   maxWords: z.number().int().min(5).max(1000).optional(),
+  /** Direct hire: only this agent is asked to quote, and the job stays off the public board. */
+  agentId: z.string().min(1).max(64).optional(),
 });
 export type JobInput = z.infer<typeof JobInput>;
 
@@ -52,6 +54,8 @@ export interface JobRow {
   max_unit_price_cents: number;
   status: "OPEN" | "AWARDED" | "CLOSED";
   pact_id: string | null;
+  /** Set for a direct hire: the one agent invited to quote. */
+  agent_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -93,11 +97,20 @@ export function createJob(db: Db, buyerId: string, input: JobInput, opts: { enfo
   const t = TEMPLATES[input.template];
   const rubric = { ...t.rubric, minWords: input.minWords ?? t.rubric.minWords, maxWords: input.maxWords ?? t.rubric.maxWords };
   if (rubric.minWords > rubric.maxWords) throw new JobError("invalid", "minWords must be <= maxWords");
+  if (input.agentId) {
+    // Direct hire: refuse up front what would otherwise end as a job nobody quotes.
+    const a = getAgent(db, input.agentId);
+    if (!agentUsable(a)) throw new JobError("invalid", "that agent is not available for hire");
+    if (a.owner_id === buyerId) throw new JobError("invalid", "you cannot hire your own agent");
+    if (a.min_unit_price_cents > input.maxUnitPriceCents) throw new JobError("invalid", `${a.name} starts at ${usd(a.min_unit_price_cents)} per item; raise the maximum price`);
+    if (a.max_items_per_job < input.items.length) throw new JobError("invalid", `${a.name} takes at most ${a.max_items_per_job} items per job`);
+    if (quotesTodayFor(db, a.id) >= a.max_quotes_per_day) throw new JobError("invalid", `${a.name} has reached its daily quote limit; try again tomorrow`);
+  }
   const id = crypto.randomUUID();
   const ts = now();
   db.run(
-    "INSERT INTO jobs (id, buyer_id, template, title, brief, items_json, rubric_json, max_unit_price_cents, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?)",
-    [id, buyerId, input.template, input.title, input.brief, JSON.stringify(input.items), JSON.stringify(rubric), input.maxUnitPriceCents, ts, ts],
+    "INSERT INTO jobs (id, buyer_id, template, title, brief, items_json, rubric_json, max_unit_price_cents, status, agent_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?)",
+    [id, buyerId, input.template, input.title, input.brief, JSON.stringify(input.items), JSON.stringify(rubric), input.maxUnitPriceCents, input.agentId ?? null, ts, ts],
   );
   return getJob(db, id)!;
 }
@@ -106,9 +119,11 @@ export function getJob(db: Db, id: string): JobRow | null {
   return db.query<JobRow, [string]>("SELECT * FROM jobs WHERE id = ?").get(id) ?? null;
 }
 
-export function listJobs(db: Db, opts: { status?: JobRow["status"]; buyerId?: string } = {}): JobRow[] {
+/** `board`: the public job board, which leaves out direct hires (private offers) and the jobs of automated demo runs. */
+export function listJobs(db: Db, opts: { status?: JobRow["status"]; buyerId?: string; board?: boolean } = {}): JobRow[] {
   const where: string[] = [];
   const args: string[] = [];
+  if (opts.board) where.push("agent_id IS NULL AND NOT EXISTS (SELECT 1 FROM pacts p WHERE p.id = jobs.pact_id AND p.kind = 'demo')");
   if (opts.status) {
     where.push("status = ?");
     args.push(opts.status);
@@ -150,6 +165,7 @@ export function eligibleAgents(db: Db, job: JobRow, limit = 5): AgentRow[] {
     .all(job.max_unit_price_cents, items);
   const out: AgentRow[] = [];
   for (const a of rows) {
+    if (job.agent_id && a.id !== job.agent_id) continue; // direct hire: only the invited agent
     if (!agentUsable(a)) continue; // paused, or no key bound to this provider
     if (a.owner_id === job.buyer_id) continue; // no self-dealing
     if (quotesTodayFor(db, a.id) >= a.max_quotes_per_day) continue;
@@ -322,7 +338,10 @@ export function cancelJob(db: Db, buyerId: string, jobId: string): JobRow {
 export function deliverableFor(db: Db, pact: PactRow): { accepted: Array<{ sku: string; title: string; description: string }>; rejected: Array<{ sku: string; reason: string }>; status: PactRow["status"]; settled: boolean } {
   const art = db.query<{ body_json: string }, [string]>("SELECT body_json FROM artifacts WHERE pact_id = ?").get(pact.id);
   const items: Array<{ sku: string; title: string; description: string }> = art ? (JSON.parse(art.body_json) as unknown[]).filter((x): x is { sku: string; title: string; description: string } => Boolean(x && typeof x === "object" && "sku" in x)) : [];
-  const verdicts = db.query<{ sku: string; verdict: string; reason: string }, [string]>("SELECT sku, verdict, reason FROM item_verdicts WHERE pact_id = ?").all(pact.id);
+  const verdicts = db
+    .query<{ sku: string; verdict: string; reason: string; evidence_json: string }, [string]>("SELECT sku, verdict, reason, evidence_json FROM item_verdicts WHERE pact_id = ?")
+    .all(pact.id)
+    .map((v) => ({ sku: v.sku, verdict: v.verdict, reason: reasonText(v.reason, JSON.parse(v.evidence_json) as string[]) }));
   const settled = pact.status === "SETTLED" || pact.status === "PAID_OUT";
   const accepted = settled ? verdicts.filter((v) => v.verdict === "accepted").map((v) => items.find((i) => i.sku === v.sku)).filter((i): i is { sku: string; title: string; description: string } => Boolean(i)) : [];
   const rejected = verdicts.filter((v) => v.verdict === "rejected").map((v) => ({ sku: v.sku, reason: v.reason }));
@@ -332,6 +351,7 @@ export function deliverableFor(db: Db, pact: PactRow): { accepted: Array<{ sku: 
 /** Public job-board view: no items, no quotes. */
 export function publicJob(db: Db, j: JobRow) {
   const buyer = db.query<{ name: string }, [string]>("SELECT name FROM users WHERE id = ?").get(j.buyer_id);
+  const invited = j.agent_id ? getAgent(db, j.agent_id) : null;
   return {
     id: j.id,
     template: j.template,
@@ -342,7 +362,56 @@ export function publicJob(db: Db, j: JobRow) {
     status: j.status,
     buyer_name: buyer?.name ?? "",
     quote_count: db.query<{ n: number }, [string]>("SELECT count(*) AS n FROM quotes WHERE job_id = ?").get(j.id)!.n,
+    agent_id: j.agent_id,
+    agent_name: invited?.name ?? null,
     created_at: j.created_at,
+  };
+}
+
+/** The verifier's finding in plain words. Rubric verdicts store a score comparison as the reason; the sentence a person wants is in the evidence. */
+export function reasonText(reason: string, evidence: string[]): string {
+  if (!reason.startsWith("rubric ")) return reason;
+  const finding = evidence.find((e) => !e.startsWith("quality "));
+  const note = evidence.find((e) => e.startsWith("quality "))?.replace(/^quality \d\/5:\s*/, "");
+  return finding ?? note ?? reason;
+}
+
+export interface MarketStats {
+  totals: { pacts: number; items: number; accepted: number; capturedCents: number; releasedCents: number; paidOutCents: number; agents: number };
+  recent: Array<{ title: string; agent_id: string | null; agent_name: string | null; item_count: number; accepted_count: number; unit_price_cents: number; authorized_cents: number; charge_cents: number; settlement_kind: string | null; settled_at: string }>;
+}
+
+/**
+ * Marketplace totals and the latest settlements for the landing page. Marketplace pacts only (automated
+ * demo runs are left out), and nothing beyond what the board and agent work histories already show:
+ * titles, item counts, prices and outcomes, never items or delivered text.
+ */
+export function marketStats(db: Db, recentLimit = 6): MarketStats {
+  const settled = "kind = 'market' AND status IN ('SETTLED', 'PAID_OUT')";
+  const t = db
+    .query<{ pacts: number; items: number; accepted: number; captured: number; released: number; paid: number }, []>(
+      `SELECT count(*) AS pacts, coalesce(sum(item_count), 0) AS items, coalesce(sum(accepted_count), 0) AS accepted,
+              coalesce(sum(charge_cents), 0) AS captured, coalesce(sum(coalesce(authorized_cents, 0) - coalesce(charge_cents, 0)), 0) AS released,
+              coalesce(sum(CASE WHEN status = 'PAID_OUT' THEN charge_cents ELSE 0 END), 0) AS paid
+       FROM pacts WHERE ${settled}`,
+    )
+    .get()!;
+  const agents = db.query<{ n: number }, []>("SELECT count(*) AS n FROM agents WHERE status = 'active'").get()!.n;
+  const rows = db.query<PactRow, [number]>(`SELECT * FROM pacts WHERE ${settled} ORDER BY updated_at DESC LIMIT ?`).all(recentLimit);
+  return {
+    totals: { pacts: t.pacts, items: t.items, accepted: t.accepted, capturedCents: t.captured, releasedCents: t.released, paidOutCents: t.paid, agents },
+    recent: rows.map((p) => ({
+      title: (JSON.parse(p.job_json) as { title: string }).title,
+      agent_id: p.agent_id,
+      agent_name: p.agent_id ? (getAgent(db, p.agent_id)?.name ?? null) : null,
+      item_count: p.item_count,
+      accepted_count: p.accepted_count ?? 0,
+      unit_price_cents: p.unit_price_cents ?? 0,
+      authorized_cents: p.authorized_cents ?? 0,
+      charge_cents: p.charge_cents ?? 0,
+      settlement_kind: p.settlement_kind,
+      settled_at: p.updated_at,
+    })),
   };
 }
 

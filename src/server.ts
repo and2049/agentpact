@@ -15,7 +15,7 @@ import { ANY, createMandate, getMandate, MandateViolation, updateMandateCaps } f
 import { usd } from "./money";
 import { AgentError, AgentInput, AgentPatch, createAgent, deleteAgentKey, ensureSeedAgent, getAgent, listAgents, llmConfigForAgent, publicAgent, updateAgent, type AgentDeps } from "./market/agents";
 import { redactedError, redactSecrets } from "./redact";
-import { awardJob, cancelJob, canSeeJobDetails, createJob, deliverableFor, getJob, JobError, JobInput, jobSpecOf, listJobs, listQuotes, mandateForBuyer, publicJob, recordQuote, reopenJobFor, reserveQuoteSlots, TEMPLATES } from "./market/jobs";
+import { awardJob, cancelJob, canSeeJobDetails, createJob, deliverableFor, getJob, JobError, JobInput, jobSpecOf, listJobs, listQuotes, mandateForBuyer, marketStats, publicJob, recordQuote, reopenJobFor, reserveQuoteSlots, TEMPLATES } from "./market/jobs";
 import { getPact, jobOf } from "./pact/machine";
 import { preparePact } from "./pact/run";
 import { TERMINAL, type Agents } from "./pact/stages";
@@ -326,9 +326,11 @@ app.delete("/api/agents/:id/key", (c) => {
 // ---------- jobs & quotes ----------
 app.get("/api/jobs", (c) => {
   const status = (c.req.query("status") ?? "open").toUpperCase();
-  const rows = listJobs(db, { status: ["OPEN", "AWARDED", "CLOSED"].includes(status) ? (status as "OPEN") : undefined });
+  const rows = listJobs(db, { status: ["OPEN", "AWARDED", "CLOSED"].includes(status) ? (status as "OPEN") : undefined, board: true });
   return c.json(rows.map((j) => publicJob(db, j)));
 });
+/** Public marketplace totals and recent settlements (landing page). */
+app.get("/api/stats", (c) => c.json(marketStats(db)));
 app.post("/api/jobs", async (c) => {
   const user = requireUser(c);
   const input = await body(c, JobInput);

@@ -16,14 +16,36 @@ import { api, type Agent, type AgentWork } from "@/lib/api"
 import { cents, pct, plural, providerLabel, when } from "@/lib/format"
 import { useLoad, useSession } from "@/lib/session"
 
+/** Direct hire: the post form scoped to one agent. Not offered on the viewer's own agents (no self-dealing). */
+function HireButton({ agent, size, label = "Hire" }: { agent: Agent; size?: "sm"; label?: string }) {
+  const { me } = useSession()
+  if (agent.status !== "active" || me?.id === agent.owner_id) return null
+  return (
+    <Button size={size} render={<Link to={`/post?agent=${agent.id}`} />} nativeButton={false}>
+      {label}
+    </Button>
+  )
+}
+
+function AgentActions({ agent }: { agent: Agent }) {
+  return (
+    <>
+      <HireButton agent={agent} size="sm" />
+      <Button size="sm" variant="ghost" render={<Link to={`/agents/${agent.id}`} />} nativeButton={false}>
+        View profile
+      </Button>
+    </>
+  )
+}
+
 export function AgentsPage() {
   const { data: agents, error, loading } = useLoad(() => api<Agent[]>("/api/agents"), [])
   return (
     <>
       <PageHeader
         eyebrow="Agents"
-        title="Agents quoting right now"
-        description="Each agent quotes inside its own price band and is paid only for items the verifier accepts. Acceptance rates are computed from settled work."
+        title="Agents for hire"
+        description="Hire one directly, or post a job and let them compete. Each agent quotes inside its own price band and is paid only for items the verifier accepts; acceptance rates come from settled work."
         actions={
           <Button variant="outline" render={<Link to="/sell" />} nativeButton={false}>
             List your agent
@@ -31,7 +53,7 @@ export function AgentsPage() {
         }
       />
       <Notice error={error} />
-      {loading && !agents ? <LoadingBlock /> : agents?.length === 0 ? <EmptyState title="No active agents" description="Be the first to list one." /> : <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{agents?.map((a) => <AgentCard key={a.id} agent={a} />)}</div>}
+      {loading && !agents ? <LoadingBlock /> : agents?.length === 0 ? <EmptyState title="No active agents" description="Be the first to list one." /> : <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{agents?.map((a) => <AgentCard key={a.id} agent={a} actions={<AgentActions agent={a} />} />)}</div>}
     </>
   )
 }
@@ -54,7 +76,7 @@ export function AgentDetailPage() {
         title={a.name}
         badge={<StatusBadge status={a.status} />}
         description={a.description || "No description yet."}
-        actions={mine && <Button variant="outline" render={<Link to={`/agents/${a.id}/edit`} />} nativeButton={false}>Edit agent</Button>}
+        actions={mine ? <Button variant="outline" render={<Link to={`/agents/${a.id}/edit`} />} nativeButton={false}>Edit agent</Button> : <HireButton agent={a} label="Hire this agent" />}
       />
       <MetaList className="-mt-2">
         <Meta>{providerLabel(a.provider)}{a.model && a.provider !== "platform" ? ` · ${a.model}` : ""}</Meta>
