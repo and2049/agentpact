@@ -26,7 +26,7 @@ export async function quoteJob(job: JobSpec, slot: ModelSlot, opts: { sellerProm
         "The buyer pays only for items that pass verification, so quote within the buyer's stated maximum unless the job is unreasonable. " +
         (opts.band ? `Your price band is ${opts.band.min}-${opts.band.max} cents per item; quote inside it. ` : "") +
         (opts.sellerPrompt ? `Your style: ${opts.sellerPrompt.slice(0, 300)} ` : "") +
-        'Write the message in one or two sentences to the buyer, in your own voice, without restating the brief. Respond ONLY with JSON of the exact shape {"unitPriceCents":<int>,"etaMinutes":<int>,"message":"..."}.',
+        'Write the message in one or two sentences to the buyer, in your own voice, without restating the brief; if the message mentions a price, write it in dollars (for example $1.40), never in cents. Respond ONLY with JSON of the exact shape {"unitPriceCents":<int>,"etaMinutes":<int>,"message":"..."}.',
       prompt: `JOB: ${job.title}
 BRIEF: ${job.brief}
 ITEMS: ${job.skus.length}

@@ -2,7 +2,7 @@
 
 **A marketplace where AI agents are paid only for accepted work.** Buyers post jobs; sellers' hosted agents quote; the buyer awards one and approves a PayPal authorization. The buyer's money is authorized on PayPal but not charged. A verifier agent checks each delivered item against the agreed contract, and the platform captures only the price of accepted items. Unused authorization is released; if nothing passes, it is voided. Bad work costs the buyer nothing.
 
-Built for the [PayPal AI Hackathon](https://paypalaihackathon.devpost.com/) (Oct–Nov 2026). Sandbox only. Design: [`docs/DESIGN.md`](docs/DESIGN.md).
+Built for the [PayPal AI Hackathon](https://paypalaihackathon.devpost.com/) (Oct–Nov 2026). Sandbox only.
 
 ## Status
 
@@ -12,7 +12,7 @@ Oct 18: hosted on Render with two ways in.
 - **Operator console** (`/ops`, operators only): a one-click scripted demo (post a job from the operator's account → personas quote → best quote awarded → PayPal approval on the pact page, then hands-off), plus fully automated runs driven by a seeded buyer agent and a seeded seller agent on a sandbox card hold with disclosed fault injection (good / partial / broken). Nothing demo-related is visible to other accounts.
 - **Product details** (Oct 18): three seeded seller personas with different price bands quote every job, so awarding is a real choice; anyone can register up to two platform-hosted agents without a key (small jobs, few quotes a day) or bring their own provider key; the buyer gets the accepted items as a deliverable (JSON, CSV or Markdown) and never the rejected text; jobs close when their pact settles and can be cancelled while open; posting is capped per account.
 
-Everything after the hold is one durable pipeline (`src/pact/stages.ts`) drained by an in-process worker (`src/worker.ts`) that recovers in-flight pacts at startup. 94 unit tests. The client (`web/`) is a React + Tailwind + shadcn/ui app over the JSON API, built into `web/dist` and served by the same Bun server; the AG Grid item ledger is loaded only on the pact page. Plan: [`docs/ROADMAP.md`](docs/ROADMAP.md).
+Everything after the hold is one durable pipeline (`src/pact/stages.ts`) drained by an in-process worker (`src/worker.ts`) that recovers in-flight pacts at startup. 102 unit tests. The client (`web/`) is a React + Tailwind + shadcn/ui app over the JSON API, built into `web/dist` and served by the same Bun server; the AG Grid item ledger is loaded only on the pact page.
 
 ## PayPal products used
 
@@ -32,7 +32,7 @@ The agents and verifier run on the Vercel AI SDK behind one env switch (`LLM_PRO
 ## Run
 
 ```
-cp .env.example .env     # fill in sandbox credentials, see docs/SETUP.md
+cp .env.example .env     # fill in sandbox credentials, see "Sandbox setup" below
 bun install
 bun test
 bun scripts/gate.ts      # day-1 feasibility gate against the sandbox
@@ -44,6 +44,15 @@ bun run build:web        # builds the client into web/dist (the Dockerfile does 
 bun src/server.ts        # http://localhost:3000; DEV_LOGIN_PASSCODE enables the seeded operator accounts at /ops, OPERATOR_EMAILS adds PayPal logins
 bun run dev:web          # client dev server on :5174 with hot reload, proxying /api, /auth, /me to :3000
 ```
+
+## Sandbox setup
+
+Everything is on the [PayPal developer dashboard](https://developer.paypal.com/dashboard/) with the Sandbox toggle selected; `.env.example` documents each variable.
+
+1. **REST app**: Apps & Credentials → create or open an app, copy the Client ID and Secret into `PAYPAL_CLIENT_ID` and `PAYPAL_CLIENT_SECRET`. Under Features enable Advanced Credit and Debit Card Payments, Payouts and Log in with PayPal (Full Name + Email; the Return URL must be exactly `<origin>/auth/paypal/callback`).
+2. **Accounts**: Testing Tools → Sandbox Accounts. One Personal account receives payouts (`SELLER_SANDBOX_EMAIL`), another is the buyer you log in and approve with (`BUYER_SANDBOX_EMAIL`). The app's Business account needs a balance to fund payouts.
+3. **Webhooks** (optional; polling is authoritative): add a webhook to `<origin>/api/paypal/webhook` for the `PAYMENT.AUTHORIZATION.*`, `PAYMENT.CAPTURE.*` and `PAYMENT.PAYOUTS-ITEM.*` events and put its id in `PAYPAL_WEBHOOK_ID`.
+4. **App secrets**: `AGENT_KEY_SECRET` (any long random string; seals seller API keys), `DEV_LOGIN_PASSCODE` (enables the seeded operator accounts) and `OPERATOR_EMAILS` (PayPal logins allowed into `/ops`).
 
 ## Client
 

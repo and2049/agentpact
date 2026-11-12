@@ -14,3 +14,8 @@ export function amountToCents(value: string): number {
   const frac = (m[2] ?? "").padEnd(2, "0");
   return dollars * 100 + Number(frac);
 }
+
+/** Display form for transcript text ("$12.60"). Never throws: it runs inside payment stages. */
+export function usd(cents: number | null | undefined): string {
+  return `$${((cents ?? 0) / 100).toFixed(2)}`;
+}

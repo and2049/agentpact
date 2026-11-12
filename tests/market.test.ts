@@ -330,6 +330,19 @@ describe("marketplace", () => {
     expect(reconcileJobs(db)).toBe(0); // idempotent
   });
 
+  test("agent reputation counts settled marketplace pacts only, never fault-injected demo runs", async () => {
+    const { db, buyer, agent, flow, job } = setup();
+    const q = recordQuote(db, job, agent, { unitPriceCents: 100, etaMinutes: 3, message: "ok" });
+    const { pact } = await awardJob({ db, flow }, { jobId: job.id, quoteId: q.id, buyerId: buyer.id });
+    db.run("UPDATE pacts SET status = 'PAID_OUT', accepted_count = 2, charge_cents = 200 WHERE id = ?", [pact.id]);
+    // A broken demo run by the same agent: 0 of 20 accepted.
+    db.run(
+      "INSERT INTO pacts (id, mandate_id, status, kind, agent_id, job_json, item_count, accepted_count, charge_cents, created_at, updated_at) SELECT 'demo-run', mandate_id, 'SETTLED', 'demo', agent_id, job_json, 20, 0, 0, created_at, updated_at FROM pacts WHERE id = ?",
+      [pact.id],
+    );
+    expect(publicAgent(db, getAgent(db, agent.id)!).stats).toEqual({ settled: 1, items: 3, accepted: 2, acceptanceRate: 2 / 3, earnedCents: 200 });
+  });
+
   test("three seeded personas quote the same job; the buyer has a real choice", () => {
     const { db, seller, job } = setup();
     const agents = eligibleAgents(db, job);

@@ -5,6 +5,7 @@
 import { z } from "zod";
 import { appendEvent, now, type Db } from "../db";
 import { ANY, createMandate, mandateForOwner, type Mandate } from "../mandate";
+import { usd } from "../money";
 import { createPact, getPact, pactHash, transition } from "../pact/machine";
 import { say } from "../pact/stages";
 import { JobSpec, SkuFacts, type Offer, type PactRow } from "../pact/types";
@@ -256,13 +257,13 @@ export async function awardJob(deps: { db: Db; flow: FlowDeps }, args: { jobId: 
     db.run("UPDATE jobs SET pact_id = ? WHERE id = ?", [pact.id, job.id]);
     db.run("UPDATE quotes SET status = CASE WHEN id = ? THEN 'awarded' ELSE 'lost' END WHERE job_id = ? AND status IN ('open', 'awarded', 'lost')", [quote.id, job.id]); // pending slots stay pending
     appendEvent(db, pact.id, "run.started", { kind: "market", jobId: job.id, itemCount: spec.skus.length, maxUnitPriceCents: spec.maxUnitPriceCents });
-    say(db, pact.id, "buyer", `Awarded "${job.title}" to ${fresh.name} at ${offer.unitPriceCents}¢ per item (${spec.skus.length} items). Payment is per accepted item after verification.`);
+    say(db, pact.id, "buyer", `Awarded "${job.title}" to ${fresh.name} at ${usd(offer.unitPriceCents)} per item (${spec.skus.length} items). Payment is per accepted item after verification.`);
     say(db, pact.id, "seller", offer.note, { quote: offer });
     transition(db, pact.id, "OFFERED", { offer_json: JSON.stringify(offer), unit_price_cents: offer.unitPriceCents }, offer);
     return transition(db, pact.id, "AGREED", { pact_hash: hash }, { unitPriceCents: offer.unitPriceCents, totalCents: offer.unitPriceCents * spec.skus.length, hash, frozen: true });
   });
   const pact = tx();
-  say(db, pact.id, "platform", `Waiting for the buyer to approve a ${offer.unitPriceCents * spec.skus.length}¢ authorization in PayPal. Nothing is captured until verification.`);
+  say(db, pact.id, "platform", `Waiting for the buyer to approve a ${usd(offer.unitPriceCents * spec.skus.length)} authorization in PayPal. Nothing is captured until verification.`);
   const checkout = await beginCheckout(deps.flow, pact.id);
   return { pact: checkout.pact ?? pact, checkout };
 }

@@ -12,6 +12,7 @@ import type { Scenario } from "./faults";
 import { sampleJob } from "./jobs/sample";
 import { loadLlmConfig, models } from "./llm";
 import { ANY, createMandate, getMandate, MandateViolation, updateMandateCaps } from "./mandate";
+import { usd } from "./money";
 import { AgentError, AgentInput, AgentPatch, createAgent, deleteAgentKey, ensureSeedAgent, getAgent, listAgents, llmConfigForAgent, publicAgent, updateAgent, type AgentDeps } from "./market/agents";
 import { redactedError, redactSecrets } from "./redact";
 import { awardJob, cancelJob, canSeeJobDetails, createJob, deliverableFor, getJob, JobError, JobInput, jobSpecOf, listJobs, listQuotes, mandateForBuyer, publicJob, recordQuote, reopenJobFor, reserveQuoteSlots, TEMPLATES } from "./market/jobs";
@@ -309,7 +310,7 @@ app.get("/api/agents/:id", (c) => {
 app.get("/api/agents/:id/pacts", (c) => {
   const a = getAgent(db, c.req.param("id"));
   if (!a) throw bad(404, "not found");
-  const rows = db.query<PactRow, [string]>("SELECT * FROM pacts WHERE agent_id = ? AND status IN ('SETTLED','PAID_OUT') ORDER BY updated_at DESC LIMIT 20").all(a.id);
+  const rows = db.query<PactRow, [string]>("SELECT * FROM pacts WHERE agent_id = ? AND kind = 'market' AND status IN ('SETTLED','PAID_OUT') ORDER BY updated_at DESC LIMIT 20").all(a.id);
   return c.json(rows.map((p) => ({ id: p.id, title: jobOf(p).title, item_count: p.item_count, accepted_count: p.accepted_count, unit_price_cents: p.unit_price_cents, settlement_kind: p.settlement_kind, updated_at: p.updated_at })));
 });
 app.patch("/api/agents/:id", async (c) => {
@@ -485,7 +486,7 @@ app.post("/api/pacts/:id/approve", async (c) => {
   if (pact.kind !== "market" || pact.buyer_id !== user.id) throw bad(403, "not your pact");
   const r = await withPactLock(id, () => completeCheckout(flow, id, b.orderId));
   if (r.ok && r.pact.status === "HELD") {
-    say(id, "platform", `Authorization recorded for ${r.pact.authorized_cents}¢. The seller agent starts now.`);
+    say(id, "platform", `Authorization recorded for ${usd(r.pact.authorized_cents)}. The seller agent starts now.`);
     enqueue(db, id, "advance");
   } else if (!r.ok && r.pact && TERMINAL.includes(r.pact.status)) reopenJobFor(db, r.pact);
   return c.json(r.ok ? { ok: true, status: r.pact.status } : { ok: false, code: r.code, error: r.message, status: r.pact?.status ?? null }, r.ok ? 200 : r.code === "not_approved" || r.code === "unknown" ? 409 : 422);

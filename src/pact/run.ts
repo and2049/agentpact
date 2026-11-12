@@ -6,6 +6,7 @@ import type { Db } from "../db";
 import { appendEvent } from "../db";
 import type { Scenario } from "../faults";
 import { getMandate } from "../mandate";
+import { usd } from "../money";
 import type { FlowDeps } from "../payments/flow";
 import { createPact, getPact } from "./machine";
 import { advance, say, type Agents, type StageDeps } from "./stages";
@@ -34,7 +35,7 @@ export function preparePact(db: Db, args: { mandateId: string; job: JobSpec; sce
   const pact = createPact(db, args.mandateId, args.job);
   db.run("UPDATE pacts SET kind = 'demo', scenario = ?, buyer_id = ?, seller_id = ? WHERE id = ?", [args.scenario, args.buyerId ?? null, args.sellerId ?? null, pact.id]);
   appendEvent(db, pact.id, "run.started", { scenario: args.scenario, jobId: args.job.id, itemCount: args.job.skus.length, maxUnitPriceCents: args.job.maxUnitPriceCents });
-  say(db, pact.id, "buyer", `Posting job "${args.job.title}": ${args.job.skus.length} items, max ${args.job.maxUnitPriceCents}¢ each. Payment is per accepted item after verification.`);
+  say(db, pact.id, "buyer", `Posting job "${args.job.title}": ${args.job.skus.length} items, max ${usd(args.job.maxUnitPriceCents)} each. Payment is per accepted item after verification.`);
   return getPact(db, pact.id)!;
 }
 

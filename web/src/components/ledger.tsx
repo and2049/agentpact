@@ -35,7 +35,8 @@ export function Ledger({ rows, unitCents, className }: { rows: LedgerRow[]; unit
   const columnDefs = React.useMemo<ColDef<LedgerRow>[]>(
     () => [
       { field: "sku", headerName: "SKU", width: 104, minWidth: 96, pinned: "left", cellClass: "font-mono" },
-      { field: "name", headerName: "Product", minWidth: 150, flex: 1 },
+      // The pinned summary row spans product through reason so its text is never clipped.
+      { field: "name", headerName: "Product", minWidth: 150, flex: 1, colSpan: (p) => (p.node?.rowPinned ? 4 : 1) },
       { field: "verdict", headerName: "Verdict", width: 118, minWidth: 110, cellRenderer: VerdictCell, filter: true },
       { field: "score", headerName: "Score", width: 84, minWidth: 80, type: "numericColumn", valueFormatter: (c) => (c.value == null ? "" : c.value.toFixed(2)) },
       { field: "reason", headerName: "Reason", minWidth: 220, flex: 2, tooltipField: "evidence" },

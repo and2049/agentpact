@@ -170,7 +170,7 @@ export function PactPage() {
       {settled && deliverable && <Deliverable pactId={id} d={deliverable} />}
 
       <div className="grid gap-4 lg:grid-cols-2">
-        <Section title="Transcript" className="lg:row-span-2 lg:max-h-[calc(100vh-12rem)]" contentClassName="min-h-0 flex-1">
+        <Section title="Transcript" className="lg:max-h-[30rem]" contentClassName="min-h-0 flex-1">
           <Transcript entries={entries} />
         </Section>
         <Section title="Money" description="Authorized is a hold, not a charge. Released funds never leave the buyer.">
@@ -192,7 +192,7 @@ export function PactPage() {
           />
           {fault && <Notice variant="default" title="Fault injection, disclosed">{fault.kind === "event" ? fault.text : ""}</Notice>}
         </Section>
-        <Section title="Item ledger" description="One row per SKU: verdict, score, reason (hover for evidence), charge">
+        <Section title="Item ledger" description="One row per SKU: verdict, score, reason (hover for evidence), charge" className="lg:col-span-2">
           <React.Suspense fallback={<LoadingBlock rows={2} />}>
             <Ledger rows={rows} unitCents={unitPrice} />
           </React.Suspense>

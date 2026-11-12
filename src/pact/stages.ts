@@ -14,6 +14,7 @@ import type { Db } from "../db";
 import { appendEvent, now } from "../db";
 import { injectFault } from "../faults";
 import { getMandate, type Mandate } from "../mandate";
+import { usd } from "../money";
 import { confirmCapture, confirmPayout, holdPact, payoutPact, settlePact, type FlowDeps } from "../payments/flow";
 import { captureForPact } from "../payments/resources";
 import type { Rubric } from "../verifier";
@@ -67,9 +68,9 @@ export async function negotiate(deps: StageDeps, pactId: string): Promise<PactRo
   const total = offer.unitPriceCents * job.skus.length;
   const hardReject =
     offer.unitPriceCents > job.maxUnitPriceCents
-      ? `unit price ${offer.unitPriceCents}¢ exceeds the job maximum ${job.maxUnitPriceCents}¢`
+      ? `unit price ${usd(offer.unitPriceCents)} exceeds the job maximum ${usd(job.maxUnitPriceCents)}`
       : total > mandate.max_per_pact_cents
-        ? `total ${total}¢ exceeds the mandate's per-pact limit ${mandate.max_per_pact_cents}¢`
+        ? `total ${usd(total)} exceeds the mandate's per-pact limit ${usd(mandate.max_per_pact_cents)}`
         : null;
   if (hardReject || !decision.accept) {
     say(db, pactId, "buyer", hardReject ? `Rejecting: ${hardReject}.` : decision.message, { enforced: Boolean(hardReject) });
@@ -85,7 +86,7 @@ export async function holdStage(deps: StageDeps, pactId: string): Promise<PactRo
   const db = deps.flow.db;
   const pact = getPact(db, pactId)!;
   const total = (pact.unit_price_cents ?? 0) * pact.item_count;
-  say(db, pactId, "platform", `Authorizing ${total}¢ on the buyer's PayPal. Nothing is captured until verification.`);
+  say(db, pactId, "platform", `Authorizing ${usd(total)} on the buyer's PayPal. Nothing is captured until verification.`);
   const held = await holdPact(deps.flow, pactId);
   if (held?.status !== "HELD") say(db, pactId, "platform", `Hold ${held?.status === "AGREED" ? "outcome unknown; retrying" : `failed (${held?.status}). Stopping`}.`);
   return held!;
@@ -145,7 +146,7 @@ export async function settleStage(deps: StageDeps, pactId: string): Promise<Pact
   const mutationPending = before.status === "VERIFIED" || before.settlement_kind === "void" || !captureForPact(db, pactId);
   const p = mutationPending ? await settlePact(deps.flow, pactId, verdictsOf(db, pactId)) : await confirmCapture(deps.flow, pactId);
   if (p?.status === "SETTLED") {
-    const text = p.settlement_kind === "void" ? "Voided the authorization; the buyer pays nothing." : p.settlement_kind === "full" ? `Captured ${p.charge_cents}¢ in full.` : `Captured ${p.charge_cents}¢ for ${p.accepted_count} accepted items; the remaining authorization is released.`;
+    const text = p.settlement_kind === "void" ? "Voided the authorization; the buyer pays nothing." : p.settlement_kind === "full" ? `Captured ${usd(p.charge_cents)} in full.` : `Captured ${usd(p.charge_cents)} for ${p.accepted_count} accepted items; the remaining authorization is released.`;
     say(db, pactId, "platform", text);
   } else if (p?.status === "SETTLEMENT_FAILED") {
     say(db, pactId, "platform", "Settlement failed; an operator must reconcile before retrying.");
@@ -157,7 +158,7 @@ export async function settleStage(deps: StageDeps, pactId: string): Promise<Pact
 export async function payoutStage(deps: StageDeps, pactId: string): Promise<PactRow> {
   const db = deps.flow.db;
   const p = await payoutPact(deps.flow, pactId);
-  if (p?.status === "PAID_OUT") say(db, pactId, "platform", `Paid the seller ${p.charge_cents}¢.`);
+  if (p?.status === "PAID_OUT") say(db, pactId, "platform", `Paid the seller ${usd(p.charge_cents)}.`);
   return p!;
 }
 

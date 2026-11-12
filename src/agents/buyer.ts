@@ -26,6 +26,7 @@ export async function decideQuote(job: JobSpec, quote: Quote, mandate: Mandate, 
       system:
         "You are a purchasing agent acting under a spending mandate from a human. You pay only for items that pass verification. " +
         "Accept a quote if the unit price is at or under your stated maximum and the total fits the mandate; otherwise reject and say why. " +
+        "In your message write money in dollars (for example $1.40 or $28.00), never in cents. " +
         'Respond ONLY with JSON of the exact shape {"accept":<boolean>,"message":"..."}.',
       prompt: [
         `JOB: ${job.title} (${job.skus.length} items)`,

@@ -207,12 +207,13 @@ export interface AgentStats {
   earnedCents: number;
 }
 
+/** Reputation comes from marketplace pacts only: automated demo runs inject faults the agent did not commit. */
 export function agentStats(db: Db, agentId: string): AgentStats {
   const r = db
     .query<{ settled: number; items: number; accepted: number; earned: number }, [string]>(
       `SELECT count(*) AS settled, coalesce(sum(item_count), 0) AS items, coalesce(sum(accepted_count), 0) AS accepted,
               coalesce(sum(CASE WHEN status = 'PAID_OUT' THEN charge_cents ELSE 0 END), 0) AS earned
-       FROM pacts WHERE agent_id = ? AND status IN ('SETTLED', 'PAID_OUT')`,
+       FROM pacts WHERE agent_id = ? AND kind = 'market' AND status IN ('SETTLED', 'PAID_OUT')`,
     )
     .get(agentId)!;
   return { settled: r.settled, items: r.items, accepted: r.accepted, acceptanceRate: r.items ? r.accepted / r.items : null, earnedCents: r.earned };
